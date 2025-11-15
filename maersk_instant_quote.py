@@ -1231,7 +1231,7 @@ def main():
 
     with sync_playwright() as p:
         context = p.chromium.launch_persistent_context(
-            user_data_dir=".pw-user-data",
+            user_data_dir=".pw-user-data-maersk",
             channel="chrome",
             headless=False,
             viewport={"width": 1366, "height": 768},

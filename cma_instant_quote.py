@@ -22,6 +22,10 @@ CSV_OUT_DIR = ROOT_DIR / "artifacts" / "output"
 CSV_OUT_DIR.mkdir(parents=True, exist_ok=True)
 CSV_FILE = CSV_OUT_DIR / "cma_breakdowns.csv"
 
+# Pasta fixa de cache/perfil do Playwright
+USER_DATA_DIR = ROOT_DIR / ".pw-user-data-cma"
+USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
 # ----------------------------------------------------------------------
 # Login CMA
 # ----------------------------------------------------------------------
@@ -138,6 +142,7 @@ def write_all_records(records: dict):
 def login_cma(page):
     """
     Faz login na CMA no próprio page e, ao final, vai para a tela de Instant Quoting.
+    Se já estiver logado e o formulário não aparecer, apenas segue para a tela de cotação.
     """
     load_dotenv()
     email = os.getenv("CMA_USER")
@@ -148,15 +153,20 @@ def login_cma(page):
 
     print("[CMA] Abrindo página de login...")
     page.goto(LOGIN_URL, timeout=90_000)
-    page.wait_for_selector(SEL_EMAIL, timeout=30_000)
-    page.fill(SEL_EMAIL, email)
-    page.fill(SEL_PASS, password)
-    print("[CMA] Enviando formulário de login...")
-    page.click(SEL_SUBMIT)
 
-    page.wait_for_load_state("networkidle")
-    page.wait_for_timeout(5_000)
-    print("[CMA] Login efetuado. Indo para Instant Quoting...")
+    try:
+        # tenta achar o formulário de login; se não achar, assume que já está logado
+        page.wait_for_selector(SEL_EMAIL, timeout=15_000)
+        page.fill(SEL_EMAIL, email)
+        page.fill(SEL_PASS, password)
+        print("[CMA] Enviando formulário de login...")
+        page.click(SEL_SUBMIT)
+
+        page.wait_for_load_state("networkidle")
+        page.wait_for_timeout(5_000)
+        print("[CMA] Login efetuado. Indo para Instant Quoting...")
+    except PWTimeout:
+        print("[CMA] Campo de login não apareceu; possivelmente já logado. Indo direto para Instant Quoting...")
 
     page.goto(INSTANT_URL, timeout=90_000)
     page.wait_for_load_state("networkidle")
@@ -311,9 +321,12 @@ def run_batch(headless: bool = False):
     records = load_previous_records()
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
-        ctx = browser.new_context()
-        page = ctx.new_page()
+        # Contexto persistente com user_data_dir fixo (.pw-user-data-cma)
+        context = p.chromium.launch_persistent_context(
+            user_data_dir=str(USER_DATA_DIR),
+            headless=headless,
+        )
+        page = context.new_page()
 
         # login inicial
         login_cma(page)
@@ -442,7 +455,7 @@ def run_batch(headless: bool = False):
                 except Exception:
                     pass
 
-        browser.close()
+        context.close()
 
     # Ao final, escreve tudo no CSV (substituição da última cotação)
     write_all_records(records)
