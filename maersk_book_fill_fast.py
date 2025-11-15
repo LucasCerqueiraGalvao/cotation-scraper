@@ -10,8 +10,9 @@ from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 # ----------------------------------------------------------------------
 # Configs e caminhos
 # ----------------------------------------------------------------------
-HUB_URL  = "https://www.maersk.com/hub/"
-BOOK_URL = "https://www.maersk.com/book/"
+HUB_URL   = "https://www.maersk.com/hub/"
+BOOK_URL  = "https://www.maersk.com/book/"
+LOGIN_URL = "https://accounts.maersk.com/ocean-maeu/auth/login?nonce=l57ZO6eIFuhBPTfq0nmI&scope=openid%20profile%20email&client_id=portaluser&redirect_uri=https%3A%2F%2Fwww.maersk.com%2Fportaluser%2Foidc%2Fcallback&response_type=code&code_challenge=LAAwusgt4i5sfIYW1m2ZQQYxZlWq60yvWPld0KbjclI"
 
 # Selectors
 SEL_ALLOW_ALL          = '[data-test="coi-allow-all-button"]'
@@ -57,7 +58,8 @@ def _clear(loc) -> None:
         loc.fill("")
     except Exception:
         try:
-            loc.press("Control+A"); loc.press("Delete")
+            loc.press("Control+A")
+            loc.press("Delete")
         except Exception:
             pass
 
@@ -68,6 +70,7 @@ def clamp_date_to_min_max(page, loc, target_dt: datetime) -> datetime:
             return datetime.strptime(head, "%a %b %d %Y")
         except Exception:
             return None
+
     try:
         min_raw = loc.get_attribute("min")
         max_raw = loc.get_attribute("max")
@@ -77,8 +80,10 @@ def clamp_date_to_min_max(page, loc, target_dt: datetime) -> datetime:
     min_dt = parse_bound(min_raw) if min_raw else None
     max_dt = parse_bound(max_raw) if max_raw else None
     dt = target_dt
-    if min_dt and dt < min_dt: dt = min_dt
-    if max_dt and dt > max_dt: dt = max_dt
+    if min_dt and dt < min_dt:
+        dt = min_dt
+    if max_dt and dt > max_dt:
+        dt = max_dt
     return dt
 
 def accept_cookies_quick(page) -> None:
@@ -92,19 +97,24 @@ def accept_cookies_quick(page) -> None:
     # JS do CookieInformation
     try:
         if page.evaluate("() => window.CookieInformation?.submitAllCategories?.() || false"):
-            log("Cookies: submitAllCategories() via JS (página)."); return
+            log("Cookies: submitAllCategories() via JS (página).")
+            return
     except Exception:
         pass
     # iframes
     for fr in page.frames:
-        if fr == page.main_frame: continue
+        if fr == page.main_frame:
+            continue
         try:
-            fr.locator(SEL_ALLOW_ALL).click(timeout=600); log(f"Cookies: Allow all (iframe {fr.url})."); return
+            fr.locator(SEL_ALLOW_ALL).click(timeout=600)
+            log(f"Cookies: Allow all (iframe {fr.url}).")
+            return
         except Exception:
             pass
         try:
             if fr.evaluate("() => window.CookieInformation?.submitAllCategories?.() || false"):
-                log(f"Cookies: submitAllCategories() via JS (iframe {fr.url})."); return
+                log(f"Cookies: submitAllCategories() via JS (iframe {fr.url}).")
+                return
         except Exception:
             pass
     log("Cookies: banner ausente (ok).")
@@ -124,16 +134,93 @@ def wait_input_valid(loc, timeout_ms=4000) -> bool:
     return False
 
 # ----------------------------------------------------------------------
+# Login Maersk
+# ----------------------------------------------------------------------
+def login_maersk(page, username: str, password: str, timeout_ms: int = 30000) -> bool:
+    """
+    Faz login na Maersk usando a tela de login padrão.
+    Usa os web-components mc-input/mc-button atravessando o Shadow DOM.
+    """
+    log("Iniciando login na Maersk...")
+
+    page.goto(LOGIN_URL, wait_until="domcontentloaded")
+    try:
+        accept_cookies_quick(page)
+    except Exception:
+        pass
+
+    # Username
+    try:
+        user_input = page.locator(
+            "mc-input[data-test='username-input'] >>> input[data-id='input']"
+        ).first
+        user_input.wait_for(state="visible", timeout=8000)
+    except Exception:
+        # fallback por label
+        user_input = page.get_by_label(re.compile(r"username", re.I)).first
+
+    user_input.click()
+    user_input.fill(username)
+
+    # Password
+    try:
+        pass_input = page.locator(
+            "mc-input[data-test='password-input'] >>> input[data-id='input']"
+        ).first
+        pass_input.wait_for(state="visible", timeout=8000)
+    except Exception:
+        pass_input = page.get_by_label(re.compile(r"password", re.I)).first
+
+    pass_input.click()
+    pass_input.fill(password)
+
+    # Botão "Log in"
+    clicked = False
+    try:
+        btn = page.get_by_role("button", name=re.compile(r"^\s*Log\s*in\s*$", re.I)).first
+        btn.wait_for(state="visible", timeout=8000)
+        btn.click()
+        clicked = True
+    except Exception:
+        try:
+            btn = page.locator(
+                "mc-button[data-test='submit-button'] >> button[part='button']"
+            ).first
+            btn.wait_for(state="visible", timeout=8000)
+            btn.click()
+            clicked = True
+        except Exception:
+            clicked = False
+
+    if not clicked:
+        log("⚠️ Login: não consegui clicar no botão 'Log in'.")
+        return False
+
+    # Espera sair da tela /auth/login
+    try:
+        page.wait_for_function(
+            "() => !window.location.href.includes('/auth/login')",
+            timeout=timeout_ms
+        )
+        log(f"Login: sucesso, URL atual: {page.url}")
+        return True
+    except Exception:
+        log(f"⚠️ Login: aparentemente não saiu da tela de login (URL: {page.url}).")
+        return False
+
+# ----------------------------------------------------------------------
 # Ações de preenchimento
 # ----------------------------------------------------------------------
 def fill_autocomplete(page, selector, text, label, wait_before_enter=0.5, arrow_down=True) -> bool:
     loc = page.locator(selector).first
     loc.wait_for(state="visible", timeout=8000)
-    loc.click(); _clear(loc)
+    loc.click()
+    _clear(loc)
     loc.fill(text)
     time.sleep(wait_before_enter)
     if arrow_down:
-        loc.press("ArrowDown"); time.sleep(0.10)
+        loc.press("ArrowDown")
+        time.sleep(0.10)
     loc.press("Enter")
 
     if wait_input_valid(loc, 4000):
@@ -145,7 +232,8 @@ def fill_autocomplete(page, selector, text, label, wait_before_enter=0.5, arrow_
         try:
             loc.click()
             if arrow_down:
-                loc.press("ArrowDown"); time.sleep(0.12)
+                loc.press("ArrowDown")
+                time.sleep(0.12)
             loc.press("Enter")
             if wait_input_valid(loc, 2500):
                 log(f"{label}: '{text}' confirmado após retry.")
@@ -156,7 +244,7 @@ def fill_autocomplete(page, selector, text, label, wait_before_enter=0.5, arrow_
     log(f"⚠️ {label}: não confirmou '{text}' (campo permaneceu inválido).")
     return False
 
-import re, time
+import re, time  # redundante mas inofensivo
 
 def set_commodity(page, text: str, wait_opts_ms: int = 5000) -> bool:
     """
@@ -173,7 +261,9 @@ def set_commodity(page, text: str, wait_opts_ms: int = 5000) -> bool:
 
     # 2) Fallback: perfura Shadow DOM do <mc-c-commodity>
     if loc is None or loc.count() == 0:
-        loc = page.locator("mc-c-commodity >>> input[role='combobox'], mc-c-commodity >>> input[data-id='input']").first
+        loc = page.locator(
+            "mc-c-commodity >>> input[role='combobox'], mc-c-commodity >>> input[data-id='input']"
+        ).first
         loc.wait_for(state="visible", timeout=6000)
 
     # Garante que está na viewport
@@ -190,12 +280,14 @@ def set_commodity(page, text: str, wait_opts_ms: int = 5000) -> bool:
 
     # Limpa e digita
     try:
-        loc.fill("")           # limpa
+        loc.fill("")  # limpa
     except Exception:
-        try: loc.press("Control+A"); loc.press("Delete")
-        except Exception: pass
+        try:
+            loc.press("Control+A")
+            loc.press("Delete")
+        except Exception:
+            pass
 
-    # Type lento ajuda a abrir o listbox
     loc.fill(text)
 
     # 4) Aguarda aparecer options no listbox (perfurando shadow)
@@ -237,7 +329,9 @@ def set_commodity(page, text: str, wait_opts_ms: int = 5000) -> bool:
 
     # 6) Últimos recursos: ArrowDown+Enter ou Enter direto
     try:
-        loc.press("ArrowDown"); time.sleep(0.15); loc.press("Enter")
+        loc.press("ArrowDown")
+        time.sleep(0.15)
+        loc.press("Enter")
         log("Commodity: confirmado via ArrowDown+Enter (fallback).")
         return True
     except Exception:
@@ -258,7 +352,8 @@ def set_container(page, text="20 Dry"):
         loc = page.get_by_label(re.compile(r"Container type and size", re.I)).first
     loc.wait_for(state="visible", timeout=8000)
 
-    loc.click(); _clear(loc)
+    loc.click()
+    _clear(loc)
     loc.fill(text)
     time.sleep(0.2)  # dá tempo do listbox montar
 
@@ -271,28 +366,41 @@ def set_container(page, text="20 Dry"):
         # fallback por teclado
         try:
             loc.click()
-            loc.press("ArrowDown"); time.sleep(0.15); loc.press("Enter")
+            loc.press("ArrowDown")
+            time.sleep(0.15)
+            loc.press("Enter")
             log(f"Container: '{text}' confirmado via ArrowDown+Enter (fallback).")
         except Exception as e2:
             log(f"⚠️ Container: não foi possível selecionar ({type(e2).__name__}).")
+
 
 def fill_weight(page, selector, kg, label="Peso (kg)") -> bool:
     loc = page.locator(selector).first
     try:
         loc.wait_for(state="visible", timeout=8000)
     except Exception:
-        log(f"⚠️ {label}: campo não visível."); return False
+        log(f"⚠️ {label}: campo não visível.")
+        return False
 
-    try: minv = int(float(loc.get_attribute("min") or "0"))
-    except: minv = 0
-    try: maxv = int(float(loc.get_attribute("max") or "999999"))
-    except: maxv = 999999
+    try:
+        minv = int(float(loc.get_attribute("min") or "0"))
+    except Exception:
+        minv = 0
+    try:
+        maxv = int(float(loc.get_attribute("max") or "999999"))
+    except Exception:
+        maxv = 999999
 
     v = int(kg)
-    if v < minv: log(f"⚠️ {label}: {v} < min ({minv}). Usando {minv}."); v = minv
-    if v > maxv: log(f"⚠️ {label}: {v} > max ({maxv}). Usando {maxv}."); v = maxv
+    if v < minv:
+        log(f"⚠️ {label}: {v} < min ({minv}). Usando {minv}.")
+        v = minv
+    if v > maxv:
+        log(f"⚠️ {label}: {v} > max ({maxv}). Usando {maxv}.")
+        v = maxv
 
-    loc.click(); _clear(loc)
+    loc.click()
+    _clear(loc)
     val = str(v)
     loc.fill(val)
     # dispara eventos (alguns web-components exigem)
@@ -300,49 +408,62 @@ def fill_weight(page, selector, kg, label="Peso (kg)") -> bool:
         handle = loc.element_handle()
         page.evaluate(
             """(el, val) => {
-                if (el.value !== val) el.value = val;
+                if (el.value != val) el.value = val;
                 el.dispatchEvent(new Event('input',  { bubbles: true }));
                 el.dispatchEvent(new Event('change', { bubbles: true }));
             }""",
-            handle, val
+            handle,
+            val,
         )
     except Exception:
         pass
 
-    try: loc.press("Tab")
+    try:
+        loc.press("Tab")
     except Exception:
-        try: loc.blur()
-        except Exception: pass
+        try:
+            loc.blur()
+        except Exception:
+            pass
 
     log(f"{label}: '{v}' definido.")
     return True
+
 
 def set_price_owner(page, owner="I am the price owner", label_for_log="Price owner"):
     # caminho preferido: role=radio (atravessa shadow DOM)
     try:
         radio = page.get_by_role("radio", name=re.compile(rf"^{re.escape(owner)}$", re.I)).first
         radio.wait_for(state="visible", timeout=3000)
-        try: radio.check(timeout=1200)
-        except Exception: radio.click(timeout=1200, force=True)
-        log(f"{label_for_log}: marcado → '{owner}'."); return
+        try:
+            radio.check(timeout=1200)
+        except Exception:
+            radio.click(timeout=1200, force=True)
+        log(f"{label_for_log}: marcado → '{owner}'.")
+        return
     except Exception:
         pass
     # fallback: host do mc-radio
     try:
         host = page.locator(f"mc-radio:has-text('{owner}')").first
         host.wait_for(state="visible", timeout=3000)
-        try: host.click(timeout=1000); log(f"{label_for_log}: host clicado → '{owner}'."); return
+        try:
+            host.click(timeout=1000)
+            log(f"{label_for_log}: host clicado → '{owner}'.")
+            return
         except Exception:
             ck = host.locator('[part="checkmark"]').first
             ck.click(timeout=1000, force=True)
-            log(f"{label_for_log}: checkmark clicado → '{owner}'."); return
+            log(f"{label_for_log}: checkmark clicado → '{owner}'.")
+            return
     except Exception:
         pass
     # último recurso: força via JS
     try:
         value_map = {"i am the price owner": "PO", "select a price owner": "select"}
         val = value_map.get(owner.lower(), "PO")
-        page.evaluate("""
+        page.evaluate(
+            """
             (value) => {
               const all = document.querySelectorAll('input[type="radio"][name="priceOwner"]');
               for (const el of all) {
@@ -351,10 +472,13 @@ def set_price_owner(page, owner="I am the price owner", label_for_log="Price own
                 el.dispatchEvent(new Event('change', {bubbles:true}));
               }
             }
-        """, val)
+        """,
+            val,
+        )
         log(f"{label_for_log}: setado via JS → '{owner}'.")
     except Exception as e:
         log(f"⚠️ {label_for_log}: falha ({type(e).__name__}).")
+
 
 def set_date_plus(page, days=7, label_for_log="Data (Earliest departure)"):
     loc = page.locator(SEL_DATE).first
@@ -369,7 +493,8 @@ def set_date_plus(page, days=7, label_for_log="Data (Earliest departure)"):
         pass
 
     date_str = dd_mmm_yyyy_en(target)
-    loc.click(); _clear(loc)
+    loc.click()
+    _clear(loc)
     loc.fill(date_str)
 
     # eventos + confirmar
@@ -377,16 +502,19 @@ def set_date_plus(page, days=7, label_for_log="Data (Earliest departure)"):
         handle = loc.element_handle()
         page.evaluate(
             "(el)=>{el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true}));}",
-            handle
+            handle,
         )
     except Exception:
         pass
 
     time.sleep(0.1)
-    try: loc.press("Enter")
+    try:
+        loc.press("Enter")
     except Exception:
-        try: loc.press("Tab")
-        except Exception: pass
+        try:
+            loc.press("Tab")
+        except Exception:
+            pass
 
     log(f"{label_for_log}: '{date_str}' definido.")
 
@@ -403,14 +531,21 @@ def wait_for_results_cards(page, timeout_sec: int = RESULTS_TIMEOUT_SEC) -> bool
         try:
             if page.locator('[data-test="offer-cards"]:visible').count() > 0:
                 return True
-            if page.locator('.product-offer-card:visible').count() > 0:
+            if page.locator(".product-offer-card:visible").count() > 0:
                 return True
-            if page.get_by_role("button", name=re.compile(r"^\s*Price\s+details\s*$", re.I)).count() > 0:
+            if (
+                page.get_by_role(
+                    "button",
+                    name=re.compile(r"^\s*Price\s+details\s*$", re.I),
+                ).count()
+                > 0
+            ):
                 return True
         except Exception:
             pass
         time.sleep(0.25)
     return False
+
 
 def open_first_price_details(page, idx_card_prefer=0, timeout_ms=10000) -> bool:
     """
@@ -424,9 +559,11 @@ def open_first_price_details(page, idx_card_prefer=0, timeout_ms=10000) -> bool:
     # Espera até existir pelo menos 1 botão "Price details" visível em qualquer card
     while time.time() - t0 < timeout_ms / 5000.0:
         try:
-            any_btn = page.locator(
-                ".product-offer-card >> mc-button:has-text('Price details') >> button[part='button']"
-            ).filter(has_text=re.compile(r"Price\s*details", re.I))
+            any_btn = (
+                page.locator(
+                    ".product-offer-card >> mc-button:has-text('Price details') >> button[part='button']"
+                ).filter(has_text=re.compile(r"Price\s*details", re.I))
+            )
             if any_btn.count() > 0:
                 break
         except Exception:
@@ -434,9 +571,11 @@ def open_first_price_details(page, idx_card_prefer=0, timeout_ms=10000) -> bool:
         time.sleep(0.25)
 
     # Recoleta os cards (container certo)
-    cards = page.locator(".product-offer-card").filter(has=page.locator("div[data-test='offer-button']"))
+    cards = page.locator(".product-offer-card").filter(
+        has=page.locator("div[data-test='offer-button']")
+    )
     if cards.count() == 0:
-        log("Resultados: nenhum '.product-offer-card' com área de botão."); 
+        log("Resultados: nenhum '.product-offer-card' com área de botão.")
         return False
 
     # Tenta priorizar o idx_card_prefer, mas cai para o primeiro que tiver botão
@@ -448,9 +587,13 @@ def open_first_price_details(page, idx_card_prefer=0, timeout_ms=10000) -> bool:
         card = cards.nth(i)
 
         # Localizadores dentro do card
-        btn_inner = card.locator("mc-button:has-text('Price details') >> button[part='button']").first
-        btn_role  = card.get_by_role("button", name=re.compile(r"^\s*Price\s+details\s*$", re.I)).first
-        btn_host  = card.locator("mc-button:has-text('Price details')").first
+        btn_inner = card.locator(
+            "mc-button:has-text('Price details') >> button[part='button']"
+        ).first
+        btn_role = card.get_by_role(
+            "button", name=re.compile(r"^\s*Price\s+details\s*$", re.I)
+        ).first
+        btn_host = card.locator("mc-button:has-text('Price details')").first
 
         # Se não tem botão, pula
         if btn_inner.count() == 0 and btn_role.count() == 0 and btn_host.count() == 0:
@@ -481,11 +624,18 @@ def open_first_price_details(page, idx_card_prefer=0, timeout_ms=10000) -> bool:
                     clicked = True
                 else:
                     # bounding box do melhor candidato
-                    target = btn_inner if btn_inner.count() > 0 else (btn_role if btn_role.count() > 0 else btn_host)
+                    target = (
+                        btn_inner
+                        if btn_inner.count() > 0
+                        else (btn_role if btn_role.count() > 0 else btn_host)
+                    )
                     el = target.element_handle() if target.count() > 0 else None
                     box = el.bounding_box() if el else None
                     if box:
-                        page.mouse.click(box["x"] + box["width"]/2, box["y"] + box["height"]/2)
+                        page.mouse.click(
+                            box["x"] + box["width"] / 2,
+                            box["y"] + box["height"] / 2,
+                        )
                         clicked = True
                 if clicked:
                     log(f"Card {i}: 'Price details' clicado (tentativa {attempt}).")
@@ -497,7 +647,8 @@ def open_first_price_details(page, idx_card_prefer=0, timeout_ms=10000) -> bool:
         if not clicked:
             # último recurso: JS dentro do shadow
             try:
-                ok = page.evaluate("""
+                ok = page.evaluate(
+                    """
                     (root) => {
                       const host = root.querySelector("mc-button:has(slot[label]), mc-button[ label ]") 
                                    || root.querySelector("mc-button");
@@ -507,42 +658,59 @@ def open_first_price_details(page, idx_card_prefer=0, timeout_ms=10000) -> bool:
                       if (b) { b.click(); return true; }
                       return false;
                     }
-                """, card.evaluate_handle("n => n"))
+                """,
+                    card.evaluate_handle("n => n"),
+                )
                 if ok:
-                    log(f"Card {i}: 'Price details' clicado via JS no shadow.")
+                    log(
+                        f"Card {i}: 'Price details' clicado via JS no shadow."
+                    )
                     clicked = True
             except Exception:
                 pass
 
         if not clicked:
-            log(f"Card {i}: falha ao clicar em 'Price details'. Tentando próximo card…")
+            log(
+                f"Card {i}: falha ao clicar em 'Price details'. Tentando próximo card…"
+            )
             continue
 
         # Espera o painel/tabela aparecer
         try:
-            page.get_by_role("tab", name=re.compile(r"Breakdown", re.I)).wait_for(state="visible", timeout=15000)
+            page.get_by_role(
+                "tab", name=re.compile(r"Breakdown", re.I)
+            ).wait_for(state="visible", timeout=15000)
             return True
         except Exception:
             pass
         try:
-            page.wait_for_selector('mc-c-table[data-test="priceBreakdown"]', timeout=15000)
+            page.wait_for_selector(
+                'mc-c-table[data-test="priceBreakdown"]', timeout=15000
+            )
             return True
         except Exception:
             # Se não abriu, tenta outro card
-            log(f"Card {i}: clique não abriu o painel no tempo esperado. Tentando próximo…")
+            log(
+                f"Card {i}: clique não abriu o painel no tempo esperado. Tentando próximo…"
+            )
             continue
 
     return False
 
+
 def ensure_breakdown_tab(page, timeout_ms=12000) -> bool:
     try:
-        tab = page.get_by_role("tab", name=re.compile(r"^\s*Breakdown\s*$", re.I)).first
+        tab = page.get_by_role(
+            "tab", name=re.compile(r"^\s*Breakdown\s*$", re.I)
+        ).first
         tab.wait_for(state="visible", timeout=timeout_ms)
         try:
             tab.click(timeout=1500)
         except Exception:
             pass
-        page.wait_for_selector('mc-c-table[data-test="priceBreakdown"]', timeout=timeout_ms)
+        page.wait_for_selector(
+            'mc-c-table[data-test="priceBreakdown"]', timeout=timeout_ms
+        )
         return True
     except Exception:
         return False
@@ -552,8 +720,10 @@ def ensure_breakdown_tab(page, timeout_ms=12000) -> bool:
 # ----------------------------------------------------------------------
 _money_re = re.compile(r"([A-Z]{3})?\s*([\-–]?\s*[\d\.\,]+)")
 
+
 def normalize_money(s: str):
-    if s is None: return None, None
+    if s is None:
+        return None, None
     txt = " ".join(str(s).split())
     m = _money_re.search(txt)
     if not m:
@@ -574,11 +744,15 @@ def normalize_money(s: str):
         val = None
     return cur, val
 
+
 def extract_breakdown_table(page) -> dict:
-    table_host = page.locator('mc-c-table[data-test="priceBreakdown"]').first
+    table_host = page.locator(
+        'mc-c-table[data-test="priceBreakdown"]'
+    ).first
     table_host.wait_for(state="visible", timeout=8000)
 
-    rows = page.evaluate("""
+    rows = page.evaluate(
+        """
         (hostSel) => {
           const host = document.querySelector(hostSel);
           if (!host) return null;
@@ -599,7 +773,9 @@ def extract_breakdown_table(page) -> dict:
           }
           return out;
         }
-    """, 'mc-c-table[data-test="priceBreakdown"]')
+    """,
+        'mc-c-table[data-test="priceBreakdown"]',
+    )
 
     if not rows:
         return {"__error": "Tabela Breakdown não disponível."}
@@ -612,12 +788,14 @@ def extract_breakdown_table(page) -> dict:
         if len(tds) < 6:
             continue
         charge_name = tds[0].strip()
-        basis       = tds[1].strip()
-        quantity    = tds[2].strip()
+        basis = tds[1].strip()
+        quantity = tds[2].strip()
 
         try:
             if "," in quantity and "." not in quantity:
-                quantity_num = float(quantity.replace(".", "").replace(",", "."))
+                quantity_num = float(
+                    quantity.replace(".", "").replace(",", ".")
+                )
             else:
                 quantity_num = float(quantity)
             if quantity_num.is_integer():
@@ -628,18 +806,20 @@ def extract_breakdown_table(page) -> dict:
         cur_u, up = normalize_money(tds[4])
         cur_t, tp = normalize_money(tds[5])
 
-        currency    = cur_t or cur_u
-        unit_price  = up
+        currency = cur_t or cur_u
+        unit_price = up
         total_price = tp
 
-        charges.append({
-            "charge_name": charge_name,
-            "basis": basis,
-            "quantity": quantity_num,
-            "currency": currency,
-            "unit_price": unit_price,
-            "total_price": total_price,
-        })
+        charges.append(
+            {
+                "charge_name": charge_name,
+                "basis": basis,
+                "quantity": quantity_num,
+                "currency": currency,
+                "unit_price": unit_price,
+                "total_price": total_price,
+            }
+        )
 
     totals_by_currency = {}
     for c in charges:
@@ -659,8 +839,8 @@ def extract_breakdown_table(page) -> dict:
         "meta": {
             "tab": "Breakdown",
             "source": "mc-c-table[data-test=priceBreakdown]",
-            "extracted_at": datetime.now().isoformat(timespec="seconds")
-        }
+            "extracted_at": datetime.now().isoformat(timespec="seconds"),
+        },
     }
 
 # ----------------------------------------------------------------------
@@ -668,6 +848,7 @@ def extract_breakdown_table(page) -> dict:
 # ----------------------------------------------------------------------
 def canonical_key(job: dict) -> str:
     return f"{job['origin'].strip()}|{job['destination'].strip()}"
+
 
 def ensure_wide_columns(df: pd.DataFrame, charges: list[dict]) -> pd.DataFrame:
     cols_needed = []
@@ -681,6 +862,7 @@ def ensure_wide_columns(df: pd.DataFrame, charges: list[dict]) -> pd.DataFrame:
             df[col] = pd.NA
     return df
 
+
 def write_wide_row(df: pd.DataFrame, job: dict, breakdown: dict | None) -> pd.DataFrame:
     key = canonical_key(job)
     row_idx = df.index[df["key"] == key].tolist()
@@ -692,14 +874,16 @@ def write_wide_row(df: pd.DataFrame, job: dict, breakdown: dict | None) -> pd.Da
         df.loc[i, "origin"] = job["origin"]
         df.loc[i, "destination"] = job["destination"]
 
-    df.loc[i, "last_attempt_at"] = job.get("_started_at") or datetime.now().isoformat(timespec="seconds")
+    df.loc[i, "last_attempt_at"] = job.get("_started_at") or datetime.now().isoformat(
+        timespec="seconds"
+    )
 
     if breakdown is None:
-        df.loc[i, "status"]  = job.get("status", "error")
+        df.loc[i, "status"] = job.get("status", "error")
         df.loc[i, "message"] = job.get("message", "Falha")
         return df
 
-    df.loc[i, "status"]  = "ok"
+    df.loc[i, "status"] = "ok"
     df.loc[i, "message"] = ""
     df.loc[i, "quoted_at"] = datetime.now().isoformat(timespec="seconds")
 
@@ -707,7 +891,15 @@ def write_wide_row(df: pd.DataFrame, job: dict, breakdown: dict | None) -> pd.Da
     df = ensure_wide_columns(df, charges)
 
     for col in df.columns:
-        if col not in {"key","origin","destination","last_attempt_at","quoted_at","status","message"}:
+        if col not in {
+            "key",
+            "origin",
+            "destination",
+            "last_attempt_at",
+            "quoted_at",
+            "status",
+            "message",
+        }:
             df.loc[i, col] = pd.NA
 
     for c in charges:
@@ -719,6 +911,7 @@ def write_wide_row(df: pd.DataFrame, job: dict, breakdown: dict | None) -> pd.Da
 
     return df
 
+
 def load_wide_csv(path: Path) -> pd.DataFrame:
     if path.exists():
         try:
@@ -728,13 +921,23 @@ def load_wide_csv(path: Path) -> pd.DataFrame:
     else:
         df = pd.DataFrame()
 
-    for base_col in ["key","origin","destination","last_attempt_at","quoted_at","status","message"]:
+    for base_col in [
+        "key",
+        "origin",
+        "destination",
+        "last_attempt_at",
+        "quoted_at",
+        "status",
+        "message",
+    ]:
         if base_col not in df.columns:
             df[base_col] = pd.Series(dtype="string")
     return df
 
+
 def save_wide_csv(df: pd.DataFrame, path: Path):
     df.to_csv(path, index=False, encoding="utf-8-sig")
+
 
 def append_run_log(status: str, job: dict, message: str = ""):
     rec = {
@@ -765,10 +968,18 @@ def read_jobs_xlsx(xlsx_path: Path) -> list[dict]:
     if not xlsx_path.exists():
         raise FileNotFoundError(f"Arquivo de entrada não encontrado: {xlsx_path}")
     df = pd.read_excel(xlsx_path, engine="openpyxl")
-    possible_orig = [c for c in df.columns if str(c).strip().lower() in {"origem","origin"}]
-    possible_dest = [c for c in df.columns if str(c).strip().lower() in {"porto de destino","destino","destination"}]
+    possible_orig = [
+        c for c in df.columns if str(c).strip().lower() in {"origem", "origin"}
+    ]
+    possible_dest = [
+        c
+        for c in df.columns
+        if str(c).strip().lower() in {"porto de destino", "destino", "destination"}
+    ]
     if not possible_orig or not possible_dest:
-        raise ValueError("Não encontrei colunas 'ORIGEM' e 'PORTO DE DESTINO' (ou equivalentes).")
+        raise ValueError(
+            "Não encontrei colunas 'ORIGEM' e 'PORTO DE DESTINO' (ou equivalentes)."
+        )
 
     col_o = possible_orig[0]
     col_d = possible_dest[0]
@@ -776,72 +987,16 @@ def read_jobs_xlsx(xlsx_path: Path) -> list[dict]:
     jobs = []
     for _, row in df.iterrows():
         origin = "" if pd.isna(row[col_o]) else str(row[col_o]).strip()
-        dest   = "" if pd.isna(row[col_d]) else str(row[col_d]).strip()
+        dest = "" if pd.isna(row[col_d]) else str(row[col_d]).strip()
         jobs.append({"origin": origin, "destination": dest})
     return jobs
 
 # ----------------------------------------------------------------------
-# Orquestra um job (uma linha do Excel) com tolerância a erro
+# Função para lidar com botão Retry
 # ----------------------------------------------------------------------
-def run_one_job(page, job: dict) -> dict | None:
-    """
-    Executa o fluxo para 1 job. Retorna o breakdown (dict) em sucesso,
-    ou {"__error": "..."} em falha (para logar motivo específico).
-    """
-    try:
-        # acorda sessão // **chamadas de cookies comentadas a pedido**
-        page.goto(HUB_URL, wait_until="domcontentloaded")
-        # accept_cookies_quick(page)
-
-        page.goto(BOOK_URL, wait_until="domcontentloaded")
-        # accept_cookies_quick(page)
-        try: page.wait_for_load_state("networkidle", timeout=7000)
-        except Exception: pass
-
-        # origem
-        ok = fill_autocomplete(page, SEL_ORIGIN, job["origin"], "Origem")
-        if not ok:
-            return {"__error": f"Origem inválida ou não reconhecida: {job['origin']}"}
-
-        # destino
-        ok = fill_autocomplete(page, SEL_DESTINATION, job["destination"], "Destino")
-        if not ok:
-            return {"__error": f"Destino inválido ou não reconhecido: {job['destination']}"}
-
-        ok_com = set_commodity(page, text=job["commodity"])
-        if not ok_com:
-            return {"__error": f"Commodity não pôde ser selecionado: '{job['commodity']}'"}
-
-        set_container(page, text=job["container"])
-
-        ok_w = fill_weight(page, SEL_WEIGHT, job["weight_kg"], "Peso (kg)")
-        if not ok_w:
-            return {"__error": "Campo de peso não visível/aceito."}
-
-        set_price_owner(page, owner=job["price_owner"])
-        set_date_plus(page, days=job["date_plus_days"], label_for_log="Data (Earliest departure)")
-
-        # NOVO: se aparecer "Retry", vai clicando até sumir antes de procurar os cards
-        press_retry_until_gone(page, total_timeout_sec=120, interval_sec=1.5)
-
-
-        # *** NOVO: espera os cards efetivamente aparecerem ***
-        if not wait_for_results_cards(page, timeout_sec=RESULTS_TIMEOUT_SEC):
-            return {"__error": f"Resultados não apareceram em {RESULTS_TIMEOUT_SEC}s."}
-
-        if not open_first_price_details(page, timeout_ms=RESULTS_TIMEOUT_SEC*1000):
-            return {"__error": "Não consegui abrir 'Price details' do primeiro card."}
-
-        if not ensure_breakdown_tab(page):
-            return {"__error": "Aba 'Breakdown' indisponível."}
-
-        bd = extract_breakdown_table(page)
-        return bd
-
-    except Exception as e:
-        return {"__error": f"{type(e).__name__}: {e}"}
-
-def press_retry_until_gone(page, total_timeout_sec=120, interval_sec=1.2, max_clicks=120) -> bool:
+def press_retry_until_gone(
+    page, total_timeout_sec=120, interval_sec=1.2, max_clicks=120
+) -> bool:
     """
     Enquanto existir um botão 'Retry' visível, clica nele repetidamente.
     Retorna True se o botão sumiu (ou nunca existiu); False se ainda restar 'Retry'
@@ -852,17 +1007,23 @@ def press_retry_until_gone(page, total_timeout_sec=120, interval_sec=1.2, max_cl
 
     def _locate_retry():
         # 1) papel acessível (muitas vezes já atravessa o shadow)
-        by_role = page.get_by_role("button", name=re.compile(r"^\s*Retry\s*$", re.I))
+        by_role = page.get_by_role(
+            "button", name=re.compile(r"^\s*Retry\s*$", re.I)
+        )
         if by_role.count() > 0 and by_role.first.is_visible():
             return ("role", by_role.first)
 
         # 2) host do componente (mc-button tem data-test estável)
-        host = page.locator("mc-button[data-test='pricing-search-again']").first
+        host = page.locator(
+            "mc-button[data-test='pricing-search-again']"
+        ).first
         if host.count() > 0 and host.is_visible():
             return ("host", host)
 
         # 3) botão real dentro do shadowRoot
-        inner = page.locator("mc-button[data-test='pricing-search-again'] >> button[part='button']").first
+        inner = page.locator(
+            "mc-button[data-test='pricing-search-again'] >> button[part='button']"
+        ).first
         if inner.count() > 0 and inner.is_visible():
             return ("inner", inner)
 
@@ -885,7 +1046,7 @@ def press_retry_until_gone(page, total_timeout_sec=120, interval_sec=1.2, max_cl
 
         clicked = False
         try:
-            target.click(timeout=800)       # tentativa normal
+            target.click(timeout=800)  # tentativa normal
             clicked = True
         except Exception:
             try:
@@ -894,7 +1055,8 @@ def press_retry_until_gone(page, total_timeout_sec=120, interval_sec=1.2, max_cl
             except Exception:
                 # 3) JS: clica no <button part="button"> dentro do shadowRoot
                 try:
-                    ok = page.evaluate("""
+                    ok = page.evaluate(
+                        """
                         (sel) => {
                           const host = document.querySelector(sel);
                           if (!host) return false;
@@ -903,7 +1065,9 @@ def press_retry_until_gone(page, total_timeout_sec=120, interval_sec=1.2, max_cl
                           if (b) { b.click(); return true; }
                           return false;
                         }
-                    """, "mc-button[data-test='pricing-search-again']")
+                    """,
+                        "mc-button[data-test='pricing-search-again']",
+                    )
                     clicked = bool(ok)
                 except Exception:
                     clicked = False
@@ -914,40 +1078,139 @@ def press_retry_until_gone(page, total_timeout_sec=120, interval_sec=1.2, max_cl
                         el = target.element_handle()
                         box = el.bounding_box() if el else None
                         if box:
-                            page.mouse.click(box["x"] + box["width"]/2, box["y"] + box["height"]/2)
+                            page.mouse.click(
+                                box["x"] + box["width"] / 2,
+                                box["y"] + box["height"] / 2,
+                            )
                             clicked = True
                     except Exception:
                         pass
 
         clicks += 1
-        log(f"Retry: clique #{clicks} ({'ok' if clicked else 'falhou'}) via {kind or 'fallback'}.")
+        log(
+            f"Retry: clique #{clicks} ({'ok' if clicked else 'falhou'}) via {kind or 'fallback'}."
+        )
 
         # pequeno backoff p/ página reagir / re-render
         time.sleep(interval_sec)
 
-        # se re-renderou, o host costuma mudar → no próximo loop a gente relocaliza
-
     # Checagem final
-    still_role = page.get_by_role("button", name=re.compile(r"^\s*Retry\s*$", re.I))
+    still_role = page.get_by_role(
+        "button", name=re.compile(r"^\s*Retry\s*$", re.I)
+    )
     still_host = page.locator("mc-button[data-test='pricing-search-again']")
-    still_inner = page.locator("mc-button[data-test='pricing-search-again'] >> button[part='button']")
-    still_there = (still_role.count() > 0 and still_role.first.is_visible()) or \
-                  (still_host.count() > 0 and still_host.first.is_visible()) or \
-                  (still_inner.count() > 0 and still_inner.first.is_visible())
+    still_inner = page.locator(
+        "mc-button[data-test='pricing-search-again'] >> button[part='button']"
+    )
+    still_there = (
+        still_role.count() > 0 and still_role.first.is_visible()
+    ) or (still_host.count() > 0 and still_host.first.is_visible()) or (
+        still_inner.count() > 0 and still_inner.first.is_visible()
+    )
 
     if still_there:
-        log(f"⚠️ Retry: ainda presente após {clicks} cliques e {int(time.time()-start)}s.")
+        log(
+            f"⚠️ Retry: ainda presente após {clicks} cliques e {int(time.time()-start)}s."
+        )
         return False
 
     log(f"Retry: botão sumiu (total cliques: {clicks}).")
     return True
 
+# ----------------------------------------------------------------------
+# Orquestra um job (uma linha do Excel) com tolerância a erro
+# ----------------------------------------------------------------------
+def run_one_job(page, job: dict) -> dict | None:
+    """
+    Executa o fluxo para 1 job. Retorna o breakdown (dict) em sucesso,
+    ou {"__error": "..."} em falha (para logar motivo específico).
+    """
+    try:
+        # acorda sessão // **chamadas de cookies comentadas a pedido**
+        page.goto(HUB_URL, wait_until="domcontentloaded")
+        # accept_cookies_quick(page)
+
+        page.goto(BOOK_URL, wait_until="domcontentloaded")
+        # accept_cookies_quick(page)
+        try:
+            page.wait_for_load_state("networkidle", timeout=7000)
+        except Exception:
+            pass
+
+        # origem
+        ok = fill_autocomplete(page, SEL_ORIGIN, job["origin"], "Origem")
+        if not ok:
+            return {
+                "__error": f"Origem inválida ou não reconhecida: {job['origin']}"
+            }
+
+        # destino
+        ok = fill_autocomplete(
+            page, SEL_DESTINATION, job["destination"], "Destino"
+        )
+        if not ok:
+            return {
+                "__error": f"Destino inválido ou não reconhecido: {job['destination']}"
+            }
+
+        ok_com = set_commodity(page, text=job["commodity"])
+        if not ok_com:
+            return {
+                "__error": f"Commodity não pôde ser selecionado: '{job['commodity']}'"
+            }
+
+        set_container(page, text=job["container"])
+
+        ok_w = fill_weight(
+            page, SEL_WEIGHT, job["weight_kg"], "Peso (kg)"
+        )
+        if not ok_w:
+            return {"__error": "Campo de peso não visível/aceito."}
+
+        set_price_owner(page, owner=job["price_owner"])
+        set_date_plus(
+            page,
+            days=job["date_plus_days"],
+            label_for_log="Data (Earliest departure)",
+        )
+
+        # NOVO: se aparecer "Retry", vai clicando até sumir antes de procurar os cards
+        press_retry_until_gone(
+            page, total_timeout_sec=120, interval_sec=1.5
+        )
+
+        # *** NOVO: espera os cards efetivamente aparecerem ***
+        if not wait_for_results_cards(page, timeout_sec=RESULTS_TIMEOUT_SEC):
+            return {
+                "__error": f"Resultados não apareceram em {RESULTS_TIMEOUT_SEC}s."
+            }
+
+        if not open_first_price_details(
+            page, timeout_ms=RESULTS_TIMEOUT_SEC * 1000
+        ):
+            return {
+                "__error": "Não consegui abrir 'Price details' do primeiro card."
+            }
+
+        if not ensure_breakdown_tab(page):
+            return {"__error": "Aba 'Breakdown' indisponível."}
+
+        bd = extract_breakdown_table(page)
+        return bd
+
+    except Exception as e:
+        return {"__error": f"{type(e).__name__}: {e}"}
 
 # ----------------------------------------------------------------------
 # MAIN (batch)
 # ----------------------------------------------------------------------
 def main():
     load_dotenv()
+
+    maersk_user = os.getenv("MAERSK_USER")
+    maersk_pass = os.getenv("MAERSK_PASS")
+    if not maersk_user or not maersk_pass:
+        raise RuntimeError("MAERSK_USER e/ou MAERSK_PASS não configurados no .env")
 
     # Defaults do .env (podem ser sobrescritos por job no futuro)
     default_commodity   = os.getenv("MAERSK_COMMODITY",   "Ceramics, stoneware")
@@ -974,28 +1237,43 @@ def main():
             viewport={"width": 1366, "height": 768},
             locale="pt-BR",
             timezone_id="America/Sao_Paulo",
-            args=["--disable-blink-features=AutomationControlled", "--disable-infobars"],
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-infobars",
+            ],
         )
-        context.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined});")
+        context.add_init_script(
+            "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
+        )
         page = context.new_page()
         page.set_default_timeout(7000)
 
+        # 🔐 Login antes da primeira cotação
+        ok_login = login_maersk(page, maersk_user, maersk_pass)
+        if not ok_login:
+            log("⚠️ Login falhou; encerrando execução.")
+            return
+
         for idx, job in enumerate(jobs, start=1):
             # defaults por job
-            job.setdefault("commodity",   default_commodity)
-            job.setdefault("container",   default_container)
-            job.setdefault("weight_kg",   default_weight_kg)
+            job.setdefault("commodity", default_commodity)
+            job.setdefault("container", default_container)
+            job.setdefault("weight_kg", default_weight_kg)
             job.setdefault("price_owner", default_price_owner)
             job.setdefault("date_plus_days", default_date_plus)
             job["_started_at"] = datetime.now().isoformat(timespec="seconds")
 
-            log(f"--- ({idx}/{len(jobs)}) {job['origin']} → {job['destination']} ---")
+            log(
+                f"--- ({idx}/{len(jobs)}) {job['origin']} → {job['destination']} ---"
+            )
 
             # valida rápido origem/destino vazios
             if is_blank(job["origin"]) or is_blank(job["destination"]):
-                job["status"]  = "error"
+                job["status"] = "error"
                 job["message"] = "Origem/Destino vazios no Excel."
-                wide_df = write_wide_row(wide_df, job, breakdown=None)
+                wide_df = write_wide_row(
+                    wide_df, job, breakdown=None
+                )
                 append_run_log("error", job, job["message"])
                 save_wide_csv(wide_df, OUT_CSV)
                 continue
@@ -1003,14 +1281,20 @@ def main():
             bd = run_one_job(page, job)
 
             if not bd or ("__error" in bd):
-                job["status"]  = "error"
-                job["message"] = (bd or {}).get("__error","Falha no fluxo/Breakdown indisponível")
-                wide_df = write_wide_row(wide_df, job, breakdown=None)
+                job["status"] = "error"
+                job["message"] = (bd or {}).get(
+                    "__error", "Falha no fluxo/Breakdown indisponível"
+                )
+                wide_df = write_wide_row(
+                    wide_df, job, breakdown=None
+                )
                 append_run_log("error", job, job["message"])
             else:
-                job["status"]  = "ok"
+                job["status"] = "ok"
                 job["message"] = ""
-                wide_df = write_wide_row(wide_df, job, breakdown=bd)
+                wide_df = write_wide_row(
+                    wide_df, job, breakdown=bd
+                )
                 append_run_log("ok", job, "")
 
             save_wide_csv(wide_df, OUT_CSV)
@@ -1019,6 +1303,6 @@ def main():
         log(f"✅ Batch concluído. Mantendo aberto por {keep_open}s…")
         time.sleep(keep_open)
 
+
 if __name__ == "__main__":
     main()
-     
