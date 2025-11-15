@@ -1,0 +1,20 @@
+# Python / venv
+.venv/
+__pycache__/
+*.pyc
+
+# Playwright / cache pesado
+.pw-user-data/
+.pw-user-data-hapag/
+.pw-user-data-cma/
+
+# artifacts (exceto input se quiser)
+artifacts/
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+
+# environment
+.env
