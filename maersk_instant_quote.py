@@ -7,6 +7,9 @@ import pandas as pd
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
+import requests
+from functools import lru_cache
+
 # ----------------------------------------------------------------------
 # Configs e caminhos
 # ----------------------------------------------------------------------
@@ -806,7 +809,11 @@ def extract_breakdown_table(page) -> dict:
         cur_u, up = normalize_money(tds[4])
         cur_t, tp = normalize_money(tds[5])
 
+        # Moeda: tenta pegar dos campos de preço; se não vier, usa a coluna "Currency" (tds[3])
         currency = cur_t or cur_u
+        if not currency:
+            currency = (tds[3] or "").strip() or None
+
         unit_price = up
         total_price = tp
 
@@ -842,6 +849,54 @@ def extract_breakdown_table(page) -> dict:
             "extracted_at": datetime.now().isoformat(timespec="seconds"),
         },
     }
+
+# ----------------------------------------------------------------------
+# Conversão de moedas para USD (via API Frankfurter)
+# ----------------------------------------------------------------------
+FX_API_BASE = os.getenv("FX_API_BASE", "https://api.frankfurter.dev/v1/latest")
+
+
+@lru_cache(maxsize=64)
+def fx_rate_to_usd(from_currency: str | None) -> float | None:
+    """
+    Retorna a taxa de conversão 1 <from_currency> -> X USD usando a API Frankfurter.
+    Cacheado por moeda para não ficar batendo toda hora na API.
+    """
+    code = (from_currency or "").strip().upper()
+    if not code:
+        return None
+    if code == "USD":
+        return 1.0
+
+    try:
+        resp = requests.get(
+            FX_API_BASE,
+            params={"base": code, "symbols": "USD"},
+            timeout=5,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        rate = (data.get("rates") or {}).get("USD")
+        if rate is None:
+            log(f"⚠️ FX: resposta sem rate para {code}->USD.")
+            return None
+        return float(rate)
+    except Exception as e:
+        log(f"⚠️ FX: erro ao buscar {code}->USD ({type(e).__name__}: {e})")
+        return None
+
+
+def amount_to_usd(amount: float | None, from_currency: str | None) -> float | None:
+    """
+    Converte um valor em <from_currency> para USD.
+    Se não conseguir (sem moeda ou falha na API), retorna None.
+    """
+    if amount is None:
+        return None
+    rate = fx_rate_to_usd(from_currency)
+    if rate is None:
+        return None
+    return float(amount) * rate
 
 # ----------------------------------------------------------------------
 # CSV WIDE (dinâmico por charge_name, prefixado por moeda)
@@ -888,8 +943,28 @@ def write_wide_row(df: pd.DataFrame, job: dict, breakdown: dict | None) -> pd.Da
     df.loc[i, "quoted_at"] = datetime.now().isoformat(timespec="seconds")
 
     charges = breakdown.get("charges", [])
-    df = ensure_wide_columns(df, charges)
 
+    # 🔁 NOVO: converte todos os totais para USD sempre que possível
+    charges_for_csv: list[dict] = []
+    for c in charges:
+        cur_original = c.get("currency")
+        total_val = c.get("total_price")
+        usd_val = amount_to_usd(total_val, cur_original)
+        if usd_val is not None:
+            c2 = dict(c)
+            c2["currency"] = "USD"
+            c2["total_price"] = usd_val
+            charges_for_csv.append(c2)
+        else:
+            # se não conseguir converter, mantém a moeda original no CSV
+            log(
+                f"⚠️ FX: não foi possível converter {cur_original} -> USD; mantendo valor original no CSV."
+            )
+            charges_for_csv.append(c)
+
+    df = ensure_wide_columns(df, charges_for_csv)
+
+    # zera todas as colunas de charge para esta linha antes de reescrever
     for col in df.columns:
         if col not in {
             "key",
@@ -902,7 +977,8 @@ def write_wide_row(df: pd.DataFrame, job: dict, breakdown: dict | None) -> pd.Da
         }:
             df.loc[i, col] = pd.NA
 
-    for c in charges:
+    # escreve os valores (já normalizados para USD quando possível)
+    for c in charges_for_csv:
         cur = c.get("currency") or "UNK"
         name = c.get("charge_name") or "Unknown"
         col = f"{cur} {name}"
