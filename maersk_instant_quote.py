@@ -43,6 +43,9 @@ for p in [ARTIFACTS, ARTIFACTS/"input", OUT_DIR, SCREENS]:
 # Timeout maior para esperar os cards de resultado (ajustável via .env)
 RESULTS_TIMEOUT_SEC = int(os.getenv("MAERSK_RESULTS_TIMEOUT_SEC", "45"))
 
+# Taxa aproximada COP → USD (ajuste conforme quiser)
+COP_TO_USD_APPROX = 0.00025   # COP 1 = 0.00025 USD  (exemplo realista)
+
 # ----------------------------------------------------------------------
 # Utils gerais
 # ----------------------------------------------------------------------
@@ -222,7 +225,7 @@ def fill_autocomplete(
     label,
     wait_before_enter=0.6,
     arrow_down=True,
-    wait_opts_ms=5000,
+    wait_opts_ms=1000,
 ) -> bool:
     """
     Autocomplete genérico (Origem/Destino) mais parecido com set_commodity:
@@ -946,8 +949,11 @@ FX_API_BASE = os.getenv("FX_API_BASE", "https://api.frankfurter.dev/v1/latest")
 @lru_cache(maxsize=64)
 def fx_rate_to_usd(from_currency: str | None) -> float | None:
     """
-    Retorna a taxa de conversão 1 <from_currency> -> X USD usando a API Frankfurter.
-    Cacheado por moeda para não ficar batendo toda hora na API.
+    Converte 1 <from_currency> -> USD.
+    Regras:
+      - Se for USD → 1.0
+      - Se for COP e API falhar → usa taxa aproximada
+      - Se não for COP e API falhar → retorna None
     """
     code = (from_currency or "").strip().upper()
     if not code:
@@ -955,6 +961,7 @@ def fx_rate_to_usd(from_currency: str | None) -> float | None:
     if code == "USD":
         return 1.0
 
+    # 1. Tentativa normal via API
     try:
         resp = requests.get(
             FX_API_BASE,
@@ -962,22 +969,28 @@ def fx_rate_to_usd(from_currency: str | None) -> float | None:
             timeout=5,
         )
         resp.raise_for_status()
+
         data = resp.json()
         rate = (data.get("rates") or {}).get("USD")
-        if rate is None:
-            log(f"⚠️ FX: resposta sem rate para {code}->USD.")
-            return None
-        return float(rate)
+
+        if rate is not None:
+            return float(rate)
+
+        # Se vier resposta sem USD → erro tratado abaixo
+        log(f"⚠️ FX: resposta sem rate para {code}->USD. payload={data}")
+
     except Exception as e:
         log(f"⚠️ FX: erro ao buscar {code}->USD ({type(e).__name__}: {e})")
-        return None
 
+    # 2. Fallback EXCLUSIVO para COP
+    if code == "COP":
+        log("⚠️ FX: usando taxa aproximada para COP -> USD.")
+        return COP_TO_USD_APPROX
+
+    # 3. Para qualquer outra moeda → não tentar converter!
+    return None
 
 def amount_to_usd(amount: float | None, from_currency: str | None) -> float | None:
-    """
-    Converte um valor em <from_currency> para USD.
-    Se não conseguir (sem moeda ou falha na API), retorna None.
-    """
     if amount is None:
         return None
     rate = fx_rate_to_usd(from_currency)
