@@ -152,48 +152,63 @@ def parse_iso(dt_str: str):
 
 def build_sorted_jobs_from_excel_and_records(df: pd.DataFrame, records: dict):
     """
-    Lê ORIGEM / PORTO DE DESTINO do Excel e retorna uma lista de (origin, dest)
-    ordenada por prioridade:
+    Retorna lista de (origin, dest) ordenada pela prioridade:
 
-    1) Primeiro leads que já tiveram sucesso (status=success), ordenados pelo quoted_at mais antigo.
-    2) Depois leads sem sucesso, ordenados pelo last_attempt_at mais antigo.
-    3) Leads sem registro ainda entram no grupo 2, com last_attempt_at "muito antigo"
-       (pra serem tentados cedo entre os que nunca deram sucesso).
+    1) Primeiro: leads SEM NENHUM histórico (sem tentativa e sem cotação) -> não existem no CSV.
+    2) Depois: leads com pelo menos uma cotação de sucesso (status='success'),
+       ordenados pelo quoted_at mais antigo.
+    3) Depois: leads com tentativa, mas sem sucesso, ordenados pelo last_attempt_at mais antigo.
     """
+
     jobs_raw = []
-    for _, row in df.iterrows():
-        origin = str(row["ORIGEM"]).strip()
-        dest = str(row["PORTO DE DESTINO"]).strip()
+    for pos, row in enumerate(df.itertuples(), start=0):
+        origin = str(getattr(row, "ORIGEM")).strip()
+        dest = str(getattr(row, "PORTO_DE_DESTINO", getattr(row, "PORTO_DE_DESTINO", None)) or row._asdict().get("PORTO DE DESTINO")).strip()  # fallback caso o nome venha com espaço
+        # Como o nome da coluna tem espaço, vamos garantir com df.columns
+        # (ajuste mais robusto abaixo)
+        # Mas vamos simplificar: vamos pegar do df direto depois desta construção se der erro
+        jobs_raw.append((pos, origin, dest))
+
+    # Correção robusta para as colunas com espaço
+    jobs_raw = []
+    for pos, row in enumerate(df.itertuples(index=False), start=0):
+        origin = str(getattr(row, df.columns.get_loc("ORIGEM")) if False else row[df.columns.get_loc("ORIGEM")] if hasattr(row, "__getitem__") else row.ORIGEM)  # fallback pra safety
+        origin = str(df.iloc[pos]["ORIGEM"]).strip()
+        dest = str(df.iloc[pos]["PORTO DE DESTINO"]).strip()
         if not origin or origin.lower() == "nan":
             continue
         if not dest or dest.lower() == "nan":
             continue
-        jobs_raw.append((origin, dest))
+        jobs_raw.append((pos, origin, dest))
 
-    def priority_for_job(job):
-        origin, dest = job
+    def priority_for_job(item):
+        pos, origin, dest = item
         key = f"{origin}-{dest}"
         rec = records.get(key)
 
-        # Flag de sucesso prévio
-        if rec and rec.get("status") == "success" and rec.get("quoted_at"):
-            has_success_flag = 0  # 0 = tem sucesso, 1 = não tem
-            quoted_dt = parse_iso(rec.get("quoted_at")) or datetime.min
-        else:
-            has_success_flag = 1
-            # sem sucesso -> joga quoted_dt pro futuro pra eles virem depois dos com sucesso
-            quoted_dt = datetime.max
+        # Caso 1: nunca teve registro no CSV -> sem tentativa nem cotação
+        if rec is None or (not rec.get("last_attempt_at") and not rec.get("quoted_at")):
+            group = 0  # mais prioritário
+            # mantém a ordem do Excel dentro do grupo
+            return (0, pos, datetime.min, datetime.min)
 
-        # Segundo critério: last_attempt_at (mais antigo primeiro)
-        if rec and rec.get("last_attempt_at"):
-            last_attempt_dt = parse_iso(rec.get("last_attempt_at")) or datetime.min
-        else:
-            # nunca tentou -> considera bem antigo, pra ter prioridade dentro do grupo
+        status = rec.get("status", "")
+        quoted_dt = parse_iso(rec.get("quoted_at")) if rec.get("quoted_at") else None
+        last_attempt_dt = parse_iso(rec.get("last_attempt_at")) if rec.get("last_attempt_at") else None
+
+        # Caso 2: já teve pelo menos uma cotação de sucesso
+        if status == "success" and quoted_dt is not None:
+            # group 1 (segundo na prioridade), mais antigo primeiro
+            return (1, quoted_dt, pos, last_attempt_dt or datetime.min)
+
+        # Caso 3: já teve tentativa, mas nunca sucesso
+        # group 2 (último), ordenado por last_attempt_at mais antigo
+        if last_attempt_dt is None:
             last_attempt_dt = datetime.min
+        return (2, last_attempt_dt, pos, quoted_dt or datetime.max)
 
-        return (has_success_flag, quoted_dt, last_attempt_dt)
-
-    jobs_sorted = sorted(jobs_raw, key=priority_for_job)
+    jobs_sorted_items = sorted(jobs_raw, key=priority_for_job)
+    jobs_sorted = [(origin, dest) for (_, origin, dest) in jobs_sorted_items]
     return jobs_sorted
 
 

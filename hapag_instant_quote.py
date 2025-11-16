@@ -29,7 +29,7 @@ LOGIN_URL = (
     "&code_challenge=pCk0nSh6hx7xHTXW2vBuJW8KE0xjWCNnUKK4R3k17rg"
     "&code_challenge_method=S256"
     "&nonce=019a8447-744b-7512-9bfc-ae9439e64e96"
-    "&state=eyJpZCI6IjAxOWE4NDQ3LTc0NGItN2ZhMC04NjU4LTMxZjRkZWRlYWFkZSIsIm1ldGEiOnsiaW50ZXJhY3Rpb25UeXBlIjoicmVkaXJlY3QifX0%3D"
+    "&state=eyJpZCI6IjAxOWE4NDQ3LTc0NGItN2ZhMC04NjU4LTMxZjRkZWRlYWFkZSIsIm1ldGEiOnsiaW50ZXJhY3Rpb25UeXBlIjoicmVkaXJlY3RifX0%3D"
 )
 
 NEW_QUOTE_URL = "https://www.hapag-lloyd.com/solutions/new-quote/#/simple?language=en"
@@ -60,6 +60,77 @@ HL_PASS = os.getenv("HL_PASS")
 
 if not HL_USER or not HL_PASS:
     raise RuntimeError("Defina HL_USER e HL_PASS no .env")
+
+
+# ----------------------------------------------------------------------
+# HISTÓRICO (CSV -> dicionário)
+# ----------------------------------------------------------------------
+def _parse_iso_or_none(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except Exception:
+        return None
+
+
+def load_history_from_csv(csv_path: Path) -> dict:
+    """
+    Lê o OUTPUT_CSV e monta um histórico por key:
+
+    history[key] = {
+        "has_any_attempt": bool,
+        "has_success": bool,
+        "last_attempt_at": datetime | None,
+        "last_success_at": datetime | None,
+    }
+    """
+    history: dict[str, dict] = {}
+
+    if not csv_path.exists():
+        return history
+
+    with csv_path.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            origin = (row.get("origin") or "").strip()
+            destination = (row.get("destination") or "").strip()
+            key = (row.get("key") or "").strip()
+            if not key:
+                key = f"{origin}-{destination}"
+
+            last_attempt = _parse_iso_or_none(row.get("last_attempt_at"))
+            quoted_at = _parse_iso_or_none(row.get("quoted_at"))
+            status = (row.get("status") or "").strip()
+
+            info = history.setdefault(
+                key,
+                {
+                    "has_any_attempt": False,
+                    "has_success": False,
+                    "last_attempt_at": None,
+                    "last_success_at": None,
+                },
+            )
+
+            if last_attempt:
+                info["has_any_attempt"] = True
+                if (
+                    info["last_attempt_at"] is None
+                    or last_attempt > info["last_attempt_at"]
+                ):
+                    info["last_attempt_at"] = last_attempt
+
+            if status == "success" and quoted_at:
+                info["has_success"] = True
+                if (
+                    info["last_success_at"] is None
+                    or quoted_at > info["last_success_at"]
+                ):
+                    info["last_success_at"] = quoted_at
+
+    log(f"Histórico carregado para {len(history)} keys a partir de {csv_path}")
+    return history
 
 
 # ----------------------------------------------------------------------
@@ -207,7 +278,8 @@ def select_spot_offer(page):
     spot_btn = page.locator(
         'button[data-testid="offer-card-select-button-spot"]'
     ).first
-    spot_btn.wait_for(timeout=60000)
+    # timeout máximo para aparecer o botão Select
+    spot_btn.wait_for(timeout=15000)
     spot_btn.click()
 
 
@@ -218,7 +290,7 @@ def extract_charge_items(page) -> dict:
     """
     log("Extraindo charge-items da sidebar...")
     container = page.locator(".sidebar .charge-items")
-    container.wait_for(timeout=60000)
+    container.wait_for(timeout=15000)
 
     items = container.locator(".charge-item")
     count = items.count()
@@ -298,7 +370,6 @@ def append_charges_to_csv(
     for charge_name in KNOWN_CHARGES:
         row[charge_name] = charges.get(charge_name)
 
-    # se o arquivo ainda não existir, cria com header
     mode = "a" if file_exists else "w"
     with csv_path.open(mode, newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -345,13 +416,80 @@ def run_single_quote_flow(page, origin: str, destination: str) -> tuple[dict, st
 
 
 # ----------------------------------------------------------------------
-# MAIN – LOOP LENDO O EXCEL
+# MAIN – LOOP LENDO O EXCEL, COM PRIORIDADE
 # ----------------------------------------------------------------------
 def main():
     if not JOBS_XLSX.exists():
         raise FileNotFoundError(f"Arquivo de jobs não encontrado: {JOBS_XLSX}")
 
     df = pd.read_excel(JOBS_XLSX)
+
+    # carrega histórico do CSV pra definir prioridades
+    history = load_history_from_csv(OUTPUT_CSV)
+
+    # monta lista de jobs com prioridade
+    jobs: list[dict] = []
+
+    for idx, row in df.iterrows():
+        origin = str(row.get("ORIGEM", "")).strip()
+        destination = str(row.get("PORTO DE DESTINO", "")).strip()
+
+        if (
+            not origin
+            or not destination
+            or origin.lower() == "nan"
+            or destination.lower() == "nan"
+        ):
+            log(f"Linha {idx}: origem/destino vazio, pulando.")
+            continue
+
+        key = f"{origin}-{destination}"
+        info = history.get(key)
+
+        # GRUPO DE PRIORIDADE:
+        # 0 = nunca tentou (nem tentativa nem cotação)
+        # 1 = já teve pelo menos uma cotação success (mais antiga -> mais prioridade)
+        # 2 = já teve tentativa mas nunca sucesso (mais antiga -> mais prioridade)
+        if info is None or not info.get("has_any_attempt", False):
+            priority_group = 0
+            priority_ts = datetime.min
+        elif info.get("has_success", False):
+            priority_group = 1
+            priority_ts = info.get("last_success_at") or info.get("last_attempt_at") or datetime.min
+        else:
+            priority_group = 2
+            priority_ts = info.get("last_attempt_at") or datetime.min
+
+        jobs.append(
+            {
+                "idx": idx,
+                "origin": origin,
+                "destination": destination,
+                "key": key,
+                "priority_group": priority_group,
+                "priority_ts": priority_ts,
+            }
+        )
+
+    # ordena os jobs conforme a regra:
+    # 1º grupo 0 (nunca tentou),
+    # 2º grupo 1 (já teve sucesso, ordenado pela cotação mais antiga),
+    # 3º grupo 2 (tentativa sem sucesso, ordenado pela tentativa mais antiga)
+    jobs.sort(
+        key=lambda j: (
+            j["priority_group"],
+            j["priority_ts"],
+            j["idx"],  # desempate: ordem original no Excel
+        )
+    )
+
+    log(
+        "Ordem de execução (grupo, data, origem->destino): "
+        + ", ".join(
+            f"[g{j['priority_group']} {j['priority_ts']} {j['origin']}->{j['destination']}]"
+            for j in jobs
+        )
+    )
 
     with sync_playwright() as p:
         context = p.chromium.launch_persistent_context(
@@ -381,22 +519,21 @@ def main():
         quote_page = context.new_page()
         quote_page.set_default_timeout(30000)
 
-        for idx, row in df.iterrows():
-            origin = str(row.get("ORIGEM", "")).strip()
-            destination = str(row.get("PORTO DE DESTINO", "")).strip()
+        for j in jobs:
+            origin = j["origin"]
+            destination = j["destination"]
+            key = j["key"]
 
-            if not origin or not destination or origin.lower() == "nan" or destination.lower() == "nan":
-                log(f"Linha {idx}: origem/destino vazio, pulando.")
-                continue
-
-            log(f"=== Processando linha {idx}: {origin} -> {destination} ===")
+            log(
+                f"=== Processando {origin} -> {destination} "
+                f"(grupo={j['priority_group']}, ref={j['priority_ts']}) ==="
+            )
 
             try:
                 charges, status, message = run_single_quote_flow(
                     quote_page, origin, destination
                 )
             except Exception as e:
-                # guarda qualquer erro bruto aqui como status=error
                 charges = {}
                 status = "error"
                 message = f"Erro não tratado no fluxo: {e!r}"
@@ -407,6 +544,7 @@ def main():
                 destination=destination,
                 status=status,
                 message=message,
+                key=key,
             )
 
         log("Processamento concluído. Fechando contexto em 10s...")

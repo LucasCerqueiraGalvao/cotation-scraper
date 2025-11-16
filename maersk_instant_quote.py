@@ -958,6 +958,89 @@ def append_run_log(status: str, job: dict, message: str = ""):
     new.to_csv(RUN_LOG_CSV, index=False, encoding="utf-8-sig")
 
 # ----------------------------------------------------------------------
+# Prioridade dos jobs com base em tentativas e cotações anteriores
+# ----------------------------------------------------------------------
+def _build_status_map(wide_df: pd.DataFrame) -> dict:
+    """
+    Cria um dicionário key -> {quoted_at: datetime|NaT, last_attempt_at: datetime|NaT}
+    a partir do CSV wide.
+    """
+    status_map: dict[str, dict] = {}
+    if wide_df.empty:
+        return status_map
+
+    for _, row in wide_df.iterrows():
+        key = row.get("key")
+        if pd.isna(key):
+            continue
+
+        last_attempt_raw = row.get("last_attempt_at")
+        quoted_raw = row.get("quoted_at")
+
+        last_attempt_dt = pd.to_datetime(last_attempt_raw, errors="coerce")
+        quoted_dt = pd.to_datetime(quoted_raw, errors="coerce")
+
+        status_map[str(key)] = {
+            "quoted_at": quoted_dt,
+            "last_attempt_at": last_attempt_dt,
+        }
+    return status_map
+
+
+def _job_sort_key(job: dict, original_idx: int, status_map: dict) -> tuple:
+    """
+    Regras de prioridade (menor tuple vem primeiro):
+
+    grupo 0 -> nunca teve tentativa nem cotação    (novos)
+    grupo 1 -> já teve cotação pelo menos 1 vez    (ordenar pela data de cotação mais antiga)
+    grupo 2 -> só teve tentativa (erro), sem cotação (ordenar pela tentativa mais antiga)
+    """
+    key = canonical_key(job)
+    info = status_map.get(key)
+
+    # default: nunca rodou
+    group = 0
+    ts = datetime.min
+
+    if info is not None:
+        qdt = info.get("quoted_at")
+        adt = info.get("last_attempt_at")
+
+        if pd.notna(qdt):
+            # já teve pelo menos uma cotação bem-sucedida
+            group = 1
+            # quanto mais antigo o quoted_at, mais prioridade => ordena por data crescente
+            ts = qdt.to_pydatetime()
+        elif pd.notna(adt):
+            # só tentativas (erros), nenhuma cotação ainda
+            group = 2
+            ts = adt.to_pydatetime()
+        else:
+            group = 0
+            ts = datetime.min
+
+    # original_idx garante estabilidade dentro do grupo
+    return (group, ts, original_idx)
+
+
+def prioritize_jobs(jobs: list[dict], wide_df: pd.DataFrame) -> list[dict]:
+    """
+    Aplica a prioridade desejada:
+
+    1) Primeiro: jobs sem tentativa nem cotação (não aparecem no CSV).
+    2) Depois: jobs que já tiveram pelo menos uma cotação (ordenados pela cotação mais antiga).
+    3) Depois: jobs que só tiveram tentativas (erro), ordenados pela tentativa mais antiga.
+    """
+    status_map = _build_status_map(wide_df)
+
+    indexed = list(enumerate(jobs))
+    ordered = sorted(
+        indexed,
+        key=lambda t: _job_sort_key(t[1], t[0], status_map),
+    )
+    return [job for _, job in ordered]
+
+# ----------------------------------------------------------------------
 # Batch: ler XLSX de jobs
 # ----------------------------------------------------------------------
 def read_jobs_xlsx(xlsx_path: Path) -> list[dict]:
@@ -1228,6 +1311,10 @@ def main():
 
     # carrega CSV wide (para sobrescrever/atualizar por chave)
     wide_df = load_wide_csv(OUT_CSV)
+
+    # 🔁 NOVO: reordena jobs de acordo com a prioridade desejada
+    jobs = prioritize_jobs(jobs, wide_df)
+    log(f"Total de jobs carregados: {len(jobs)} (ordenados por prioridade).")
 
     with sync_playwright() as p:
         context = p.chromium.launch_persistent_context(
