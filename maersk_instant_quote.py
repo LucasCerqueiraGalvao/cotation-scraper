@@ -214,20 +214,107 @@ def login_maersk(page, username: str, password: str, timeout_ms: int = 30000) ->
 # ----------------------------------------------------------------------
 # Ações de preenchimento
 # ----------------------------------------------------------------------
-def fill_autocomplete(page, selector, text, label, wait_before_enter=0.5, arrow_down=True) -> bool:
+
+def fill_autocomplete(
+    page,
+    selector,
+    text,
+    label,
+    wait_before_enter=0.6,
+    arrow_down=True,
+    wait_opts_ms=5000,
+) -> bool:
+    """
+    Autocomplete genérico (Origem/Destino) mais parecido com set_commodity:
+    - digita o texto
+    - espera o dropdown de opções
+    - tenta clicar numa option que contenha o texto
+    - fallback: ArrowDown+Enter + retries
+    """
     loc = page.locator(selector).first
     loc.wait_for(state="visible", timeout=8000)
+
+    # garante que está na viewport
+    try:
+        loc.scroll_into_view_if_needed(timeout=800)
+    except Exception:
+        pass
+
     loc.click()
     _clear(loc)
     loc.fill(text)
+
+    # pequena espera inicial para API começar a responder
     time.sleep(wait_before_enter)
+
+    # tenta descobrir o listbox vinculado via aria-controls (mais preciso)
+    try:
+        listbox_id = loc.get_attribute("aria-controls")
+    except Exception:
+        listbox_id = None
+
+    if listbox_id:
+        opts = page.locator(f'#{listbox_id} [role="option"]')
+    else:
+        # fallback mais genérico (como em set_commodity)
+        opts = page.locator('[role="option"]')
+
+    # espera as options aparecerem
+    appeared = False
+    t0 = time.time()
+    while time.time() - t0 < (wait_opts_ms / 1000.0):
+        try:
+            if opts.count() > 0 and opts.first.is_visible():
+                appeared = True
+                break
+        except Exception:
+            pass
+        # dá um nudge pra abrir o dropdown se ainda não abriu
+        try:
+            loc.press("ArrowDown")
+        except Exception:
+            pass
+        time.sleep(0.15)
+
+    if appeared:
+        # tenta achar uma option que contenha o texto digitado (código UNLOCODE, cidade, etc.)
+        try:
+            match_opt = opts.filter(has_text=re.compile(re.escape(text), re.I)).first
+            if match_opt.count() > 0 and match_opt.is_visible():
+                match_opt.click()
+                if wait_input_valid(loc, 4000):
+                    log(f"{label}: option que casa '{text}' selecionada.")
+                    return True
+            # se não achar match específico, clica na primeira visível
+            first_opt = opts.first
+            if first_opt.count() > 0 and first_opt.is_visible():
+                first_opt.click()
+                if wait_input_valid(loc, 4000):
+                    log(f"{label}: primeira option selecionada para '{text}'.")
+                    return True
+        except Exception:
+            pass
+
+    # se não conseguiu usar dropdown, cai pro comportamento antigo
+    try:
+        loc.click()
+    except Exception:
+        pass
+
     if arrow_down:
-        loc.press("ArrowDown")
-        time.sleep(0.10)
-    loc.press("Enter")
+        try:
+            loc.press("ArrowDown")
+            time.sleep(0.12)
+        except Exception:
+            pass
+
+    try:
+        loc.press("Enter")
+    except Exception:
+        pass
 
     if wait_input_valid(loc, 4000):
-        log(f"{label}: '{text}' + Enter (ok).")
+        log(f"{label}: '{text}' confirmado via teclado (fallback).")
         return True
 
     # retries leves
