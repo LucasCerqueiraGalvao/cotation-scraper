@@ -89,11 +89,12 @@ SEL_RATE_TOTAL_CURRENCY = "div.rate-wrapper table.footer div.price.current span.
 
 
 # ----------------------------------------------------------------------
-# Utilidades
+# Utilidades de CSV
 # ----------------------------------------------------------------------
 def load_previous_records() -> dict:
     """
     Lê o CSV existente (se houver) e devolve um dict {key: row_dict}.
+    Aqui a key é ORIGEM-DESTINO (sem data), representando o 'lead'.
     """
     records = {}
     if CSV_FILE.exists():
@@ -109,6 +110,7 @@ def write_all_records(records: dict):
     """
     Escreve todos os records no CSV, substituindo o arquivo.
     Garante ordem: colunas fixas + dinâmicas.
+    Chamado após CADA job, pra manter o CSV sempre atualizado.
     """
     if not records:
         return
@@ -139,6 +141,65 @@ def write_all_records(records: dict):
             writer.writerow(records[key])
 
 
+def parse_iso(dt_str: str):
+    if not dt_str:
+        return None
+    try:
+        return datetime.fromisoformat(dt_str)
+    except Exception:
+        return None
+
+
+def build_sorted_jobs_from_excel_and_records(df: pd.DataFrame, records: dict):
+    """
+    Lê ORIGEM / PORTO DE DESTINO do Excel e retorna uma lista de (origin, dest)
+    ordenada por prioridade:
+
+    1) Primeiro leads que já tiveram sucesso (status=success), ordenados pelo quoted_at mais antigo.
+    2) Depois leads sem sucesso, ordenados pelo last_attempt_at mais antigo.
+    3) Leads sem registro ainda entram no grupo 2, com last_attempt_at "muito antigo"
+       (pra serem tentados cedo entre os que nunca deram sucesso).
+    """
+    jobs_raw = []
+    for _, row in df.iterrows():
+        origin = str(row["ORIGEM"]).strip()
+        dest = str(row["PORTO DE DESTINO"]).strip()
+        if not origin or origin.lower() == "nan":
+            continue
+        if not dest or dest.lower() == "nan":
+            continue
+        jobs_raw.append((origin, dest))
+
+    def priority_for_job(job):
+        origin, dest = job
+        key = f"{origin}-{dest}"
+        rec = records.get(key)
+
+        # Flag de sucesso prévio
+        if rec and rec.get("status") == "success" and rec.get("quoted_at"):
+            has_success_flag = 0  # 0 = tem sucesso, 1 = não tem
+            quoted_dt = parse_iso(rec.get("quoted_at")) or datetime.min
+        else:
+            has_success_flag = 1
+            # sem sucesso -> joga quoted_dt pro futuro pra eles virem depois dos com sucesso
+            quoted_dt = datetime.max
+
+        # Segundo critério: last_attempt_at (mais antigo primeiro)
+        if rec and rec.get("last_attempt_at"):
+            last_attempt_dt = parse_iso(rec.get("last_attempt_at")) or datetime.min
+        else:
+            # nunca tentou -> considera bem antigo, pra ter prioridade dentro do grupo
+            last_attempt_dt = datetime.min
+
+        return (has_success_flag, quoted_dt, last_attempt_dt)
+
+    jobs_sorted = sorted(jobs_raw, key=priority_for_job)
+    return jobs_sorted
+
+
+# ----------------------------------------------------------------------
+# Login / navegação
+# ----------------------------------------------------------------------
 def login_cma(page):
     """
     Faz login na CMA no próprio page e, ao final, vai para a tela de Instant Quoting.
@@ -197,6 +258,7 @@ def try_open_first_details(page) -> bool:
     """
     Após clicar em 'Obter minha cotação', tenta abrir o primeiro Detalhes.
     Retorna True se conseguiu, False se não havia detalhes (sem cotação).
+    Timeouts mais curtos pra não travar quando não tem rota.
     """
     try:
         # tenta esperar a lista de resultados
@@ -264,7 +326,7 @@ def parse_rate_table(page, base_record: dict) -> dict:
 
         # nome da coluna = texto da cobrança
         record[charge_name] = amount_value
-        # se você quiser salvar moeda por cobrança, daria pra criar colunas extras aqui
+        # (se quiser moeda por cobrança, pode criar colunas extras aqui)
 
     # total all in
     try:
@@ -298,6 +360,9 @@ def parse_rate_table(page, base_record: dict) -> dict:
 # Fluxo principal
 # ----------------------------------------------------------------------
 def run_batch(headless: bool = False):
+    # Lê registros anteriores (pra saber prioridade e manter histórico)
+    records = load_previous_records()
+
     # Lê jobs do Excel
     df = pd.read_excel(INPUT_JOBS)
 
@@ -305,20 +370,9 @@ def run_batch(headless: bool = False):
     if "ORIGEM" not in df.columns or "PORTO DE DESTINO" not in df.columns:
         raise ValueError("Excel precisa ter colunas 'ORIGEM' e 'PORTO DE DESTINO'.")
 
-    jobs = []
-    for _, row in df.iterrows():
-        origin = str(row["ORIGEM"]).strip()
-        dest = str(row["PORTO DE DESTINO"]).strip()
-        if not origin or origin.lower() == "nan":
-            continue
-        if not dest or dest.lower() == "nan":
-            continue
-        jobs.append((origin, dest))
-
+    # Ordena jobs com base no CSV de saída (prioridade)
+    jobs = build_sorted_jobs_from_excel_and_records(df, records)
     print(f"[CMA] Total de jobs carregados do Excel: {len(jobs)}")
-
-    # Lê registros anteriores (para substituição da última cotação)
-    records = load_previous_records()
 
     with sync_playwright() as p:
         # Contexto persistente com user_data_dir fixo (.pw-user-data-cma)
@@ -334,10 +388,9 @@ def run_batch(headless: bool = False):
         for idx, (origin, dest) in enumerate(jobs, start=1):
             print(f"\n[CMA] ==== Job {idx}/{len(jobs)}: {origin} -> {dest} ====")
 
-            # Gera chave única para este par + data base (hoje+7)
-            target_date = date.today() + timedelta(days=7)
+            # chave única por lead (origem-destino)
             now_iso = datetime.utcnow().isoformat()
-            key = f"{origin}-{dest}-{target_date.isoformat()}"
+            key = f"{origin}-{dest}"
 
             # Record base: se já existir, começamos dele (pra manter valores antigos em caso de erro)
             base_record = records.get(key, {}).copy()
@@ -348,6 +401,10 @@ def run_batch(headless: bool = False):
             # quoted_at só será atualizado em caso de sucesso
             base_record.setdefault("quoted_at", "")
 
+            # Data-alvo: hoje + 7
+            target_date = date.today() + timedelta(days=7)
+            date_str = target_date.strftime("%d/%m/%Y")
+
             # Garante que estamos na tela de instant quoting
             if not ensure_instant_form(page):
                 # erro de login / form indisponível
@@ -355,6 +412,9 @@ def run_batch(headless: bool = False):
                 base_record["message"] = "Não foi possível carregar formulário de cotação (login falhou)."
                 records[key] = base_record
                 print("[CMA] Erro: formulário não disponível, seguindo para próximo job.")
+
+                # atualiza CSV imediatamente
+                write_all_records(records)
                 continue
 
             try:
@@ -375,7 +435,6 @@ def run_batch(headless: bool = False):
                 print(f"[CMA] Origem/Destino preenchidos: {origin} -> {dest}")
 
                 # DATA: hoje + 7 dias
-                date_str = target_date.strftime("%d/%m/%Y")
                 page.wait_for_selector(SEL_DEPARTURE_INPUT, timeout=30_000)
                 page.click(SEL_DEPARTURE_INPUT)
                 page.fill(SEL_DEPARTURE_INPUT, date_str)
@@ -420,9 +479,16 @@ def run_batch(headless: bool = False):
                     base_record["message"] = "Nenhuma cotação SPOT encontrada (sem botão Detalhes)."
                     records[key] = base_record
                     print("[CMA] Nenhuma cotação encontrada para este par. Indo para próximo job.")
+
                     # volta para tela principal
-                    page.goto(INSTANT_URL, timeout=90_000)
-                    page.wait_for_load_state("networkidle")
+                    try:
+                        page.goto(INSTANT_URL, timeout=90_000)
+                        page.wait_for_load_state("networkidle")
+                    except Exception:
+                        pass
+
+                    # atualiza CSV imediatamente
+                    write_all_records(records)
                     continue
 
                 print("[CMA] Detalhes da rota abertos. Lendo tabela de rate...")
@@ -438,8 +504,11 @@ def run_batch(headless: bool = False):
                 print("[CMA] Cotação lida e registrada com sucesso.")
 
                 # Volta para tela principal para próximo job
-                page.goto(INSTANT_URL, timeout=90_000)
-                page.wait_for_load_state("networkidle")
+                try:
+                    page.goto(INSTANT_URL, timeout=90_000)
+                    page.wait_for_load_state("networkidle")
+                except Exception:
+                    pass
 
             except Exception as e:
                 # qualquer erro nessa rota -> marca como error, mantendo valores antigos se houver
@@ -455,10 +524,11 @@ def run_batch(headless: bool = False):
                 except Exception:
                     pass
 
+            # >>> AQUI: após CADA job, escreve o CSV atualizado <<<
+            write_all_records(records)
+
         context.close()
 
-    # Ao final, escreve tudo no CSV (substituição da última cotação)
-    write_all_records(records)
     print(f"\n[CMA] Processamento concluído. CSV atualizado em: {CSV_FILE}")
 
 
