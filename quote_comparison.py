@@ -23,6 +23,70 @@ OUTPUT_FILE = ROOT / r"artifacts\output\comparacao_carriers.csv"
 
 
 # ----------------------------------------------------------------------
+# CONFIGURAÇÃO: quais categorias entram no total?
+# ----------------------------------------------------------------------
+# Se estiver True, TODAS as colunas mapeadas naquela categoria
+# serão somadas no total do carrier.
+CATEGORY_FLAGS = {
+    "ocean_freight": True,   # "Ocean Freight"
+    "export_surcharges": False,
+    "freight_surcharges": True,  # "Freight Surcharges"
+    "import_surcharges": False,
+}
+
+# ----------------------------------------------------------------------
+# MAPEAMENTO DE COLUNAS POR CARRIER
+# ----------------------------------------------------------------------
+
+# HAPAG: colunas do hapag_breakdowns.csv
+HAPAG_MAP = {
+    "ocean_freight": ["Ocean Freight"],
+    "export_surcharges": ["Export Surcharges"],
+    "freight_surcharges": ["Freight Surcharges"],
+    "import_surcharges": ["Import Surcharges"],
+}
+
+# CMA: no seu CSV atual só tem total_all_in.
+# Aqui, mapeamos total_all_in para todas as categorias,
+# mas na hora de somar usamos conjunto de colunas,
+# então total_all_in só entra UMA vez mesmo se várias categorias estiverem True.
+CMA_MAP = {
+    "ocean_freight": ["total_all_in"],
+    "export_surcharges": ["total_all_in"],
+    "freight_surcharges": ["total_all_in"],
+    "import_surcharges": ["total_all_in"],
+}
+
+# MAERSK: colunas do maersk_breakdowns.csv
+MAERSK_MAP = {
+    "ocean_freight": [
+        "USD Basic Ocean Freight",
+    ],
+    "export_surcharges": [
+        "USD Documentation Fee Origin",
+        "USD Terminal Handling Service - Origin",
+        "USD Export Service",
+    ],
+    "freight_surcharges": [
+        "USD Container Protect Unlimited",
+        "USD Container Protect Essential",
+        # Se existir essa coluna no CSV, ela entra; se não existir, é ignorada pelo sum_cols
+        "USD Emission Surcharge for SPOT Bookings",
+    ],
+    "import_surcharges": [
+        "USD Inland Haulage Import",
+        "USD Documentation fee - Destination",
+        "USD Import Service",
+        "USD Terminal Handling Service - Destination",
+        "USD Import Intermodal Fuel Fee",
+        "USD Port Additionals / Port Dues Import",
+        "COP Inland Haulage Import",
+        "USD Inspection Fee- Import",
+    ],
+}
+
+
+# ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
 def sum_cols(df: pd.DataFrame, cols):
@@ -60,6 +124,19 @@ def best_price_and_carrier(row):
     best_carrier = min(valores_validos, key=valores_validos.get)
     best_price = valores_validos[best_carrier]
     return pd.Series({"best_price": best_price, "best_carrier": best_carrier})
+
+
+def compute_carrier_total(df: pd.DataFrame, mapping: dict) -> pd.Series:
+    """
+    Dado um DataFrame e um mapeamento {categoria: [colunas]},
+    aplica CATEGORY_FLAGS para decidir quais categorias entram
+    e soma todas as colunas correspondentes (sem duplicar).
+    """
+    cols_to_sum = set()
+    for cat, cols in mapping.items():
+        if CATEGORY_FLAGS.get(cat, False):
+            cols_to_sum.update(cols)
+    return sum_cols(df, list(cols_to_sum))
 
 
 # ----------------------------------------------------------------------
@@ -125,64 +202,23 @@ maersk_merged = maersk_df.merge(
 
 
 # ----------------------------------------------------------------------
-# 3) Calcular total (Ocean + Freight + Import) para cada carrier
+# 3) Calcular total dinâmico para cada carrier (usando flags + mapping)
 # ----------------------------------------------------------------------
 
-# ----------------- HAPAG -----------------
-# Colunas no hapag_breakdowns:
-#   "Ocean Freight", "Freight Surcharges", "Export Surcharges", "Import Surcharges"
-hapag_merged["hapag"] = sum_cols(
-    hapag_merged,
-    ["Ocean Freight", "Freight Surcharges", "Import Surcharges"],
-)
-
-# se tiver várias linhas por indexador (várias tentativas), pega o MAIOR valor
-# (última cotação com valor normalmente)
+# HAPAG
+hapag_merged["hapag"] = compute_carrier_total(hapag_merged, HAPAG_MAP)
 hapag_group = (
     hapag_merged.groupby("indexador", as_index=False)["hapag"].max()
 )
 
-
-# ----------------- CMA -----------------
-# Seu cma_breakdowns atual só tem:
-#   "total_all_in", "total_currency"
-# Aqui vamos usar total_all_in como aproximação de
-# Ocean + Freight Surcharges + Import Surcharges.
-cma_merged["cma"] = sum_cols(cma_merged, ["total_all_in"])
-
+# CMA
+cma_merged["cma"] = compute_carrier_total(cma_merged, CMA_MAP)
 cma_group = (
     cma_merged.groupby("indexador", as_index=False)["cma"].max()
 )
 
-
-# ----------------- MAERSK -----------------
-# Colunas UNK da Maersk com o mapeamento para:
-# Ocean Freight, Freight Surcharges, Import Surcharges
-MAERSK_OCEAN = [
-    "UNK Basic Ocean Freight",
-]
-
-MAERSK_FREIGHT_SURCH = [
-    "UNK Container Protect Unlimited",
-    "UNK Container Protect Essential",
-    "UNK Emission Surcharge for SPOT Bookings",
-]
-
-MAERSK_IMPORT_SURCH = [
-    "UNK Inland Haulage Import",
-    "UNK Documentation fee - Destination",
-    "UNK Import Service",
-    "UNK Terminal Handling Service - Destination",
-    "UNK Import Intermodal Fuel Fee",
-    "UNK Port Additionals / Port Dues Import",
-]
-
-maersk_merged["maersk"] = (
-    sum_cols(maersk_merged, MAERSK_OCEAN)
-    + sum_cols(maersk_merged, MAERSK_FREIGHT_SURCH)
-    + sum_cols(maersk_merged, MAERSK_IMPORT_SURCH)
-)
-
+# MAERSK
+maersk_merged["maersk"] = compute_carrier_total(maersk_merged, MAERSK_MAP)
 maersk_group = (
     maersk_merged.groupby("indexador", as_index=False)["maersk"].max()
 )
@@ -238,6 +274,5 @@ base.to_csv(
     sep=";",        # separador de colunas
     decimal=","     # separador decimal
 )
-
 
 print(f"Arquivo gerado em: {OUTPUT_FILE}")
