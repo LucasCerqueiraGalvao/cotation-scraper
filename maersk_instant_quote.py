@@ -1017,8 +1017,34 @@ def ensure_wide_columns(df: pd.DataFrame, charges: list[dict]) -> pd.DataFrame:
             df[col] = pd.NA
     return df
 
-
 def write_wide_row(df: pd.DataFrame, job: dict, breakdown: dict | None) -> pd.DataFrame:
+    """
+    Escreve/atualiza UMA linha (1 key = origem|destino) no CSV wide.
+
+    Como funciona:
+      - Cada charge vira uma coluna dinâmica no formato: "<CUR> <charge_name>"
+        Ex.: "USD Ocean Freight", "EUR Documentation fee - Destination", etc.
+      - O valor escrito é o total_price daquela charge.
+
+    Regra de FX (já existia):
+      - Tenta converter todos os totais para USD quando possível (amount_to_usd)
+      - Se não conseguir converter, mantém a moeda original.
+
+    REGRA NOVA (o que você pediu):
+      - NÃO converter a charge de THC Import:
+            "Terminal Handling Service - Destination"
+        => Ou seja: ela deve SEMPRE permanecer na moeda original.
+        Resultado: você vai ter variantes por moeda no wide, por exemplo:
+            "USD Terminal Handling Service - Destination"
+            "EUR Terminal Handling Service - Destination"
+            "COP Terminal Handling Service - Destination"
+        (em vez de tudo virar "USD ...").
+    """
+    # Regex robusto para pegar exatamente a THC de destino (variações de espaços/hífen)
+    THC_DEST_NAME_RE = re.compile(
+        r"^\s*Terminal\s+Handling\s+Service\s*-\s*Destination\s*$", re.I
+    )
+
     key = canonical_key(job)
     row_idx = df.index[df["key"] == key].tolist()
     if row_idx:
@@ -1029,26 +1055,43 @@ def write_wide_row(df: pd.DataFrame, job: dict, breakdown: dict | None) -> pd.Da
         df.loc[i, "origin"] = job["origin"]
         df.loc[i, "destination"] = job["destination"]
 
+    # Sempre marca a tentativa
     df.loc[i, "last_attempt_at"] = job.get("_started_at") or datetime.now().isoformat(
         timespec="seconds"
     )
 
+    # Se não tem breakdown (falha), só registra status/mensagem
     if breakdown is None:
         df.loc[i, "status"] = job.get("status", "error")
         df.loc[i, "message"] = job.get("message", "Falha")
         return df
 
+    # Sucesso
     df.loc[i, "status"] = "ok"
     df.loc[i, "message"] = ""
     df.loc[i, "quoted_at"] = datetime.now().isoformat(timespec="seconds")
 
     charges = breakdown.get("charges", [])
 
-    # 🔁 NOVO: converte todos os totais para USD sempre que possível
+    # ------------------------------------------------------------------
+    # FX / Normalização para CSV:
+    # - Converte para USD sempre que possível (como já era)
+    # - EXCETO para THC Dest (Terminal Handling Service - Destination),
+    #   que deve ficar na moeda original SEMPRE.
+    # ------------------------------------------------------------------
     charges_for_csv: list[dict] = []
     for c in charges:
+        name = (c.get("charge_name") or "").strip()
         cur_original = c.get("currency")
         total_val = c.get("total_price")
+
+        # ✅ REGRA NOVA: NÃO CONVERTER THC DEST
+        if THC_DEST_NAME_RE.match(name):
+            # Mantém exatamente como veio: moeda original + valor original
+            charges_for_csv.append(c)
+            continue
+
+        # 🔁 Regra antiga: tentar converter para USD
         usd_val = amount_to_usd(total_val, cur_original)
         if usd_val is not None:
             c2 = dict(c)
@@ -1056,15 +1099,16 @@ def write_wide_row(df: pd.DataFrame, job: dict, breakdown: dict | None) -> pd.Da
             c2["total_price"] = usd_val
             charges_for_csv.append(c2)
         else:
-            # se não conseguir converter, mantém a moeda original no CSV
+            # Se não conseguir converter, mantém a moeda original no CSV
             log(
                 f"⚠️ FX: não foi possível converter {cur_original} -> USD; mantendo valor original no CSV."
             )
             charges_for_csv.append(c)
 
+    # Garante que existam colunas para todas as charges que vamos escrever
     df = ensure_wide_columns(df, charges_for_csv)
 
-    # zera todas as colunas de charge para esta linha antes de reescrever
+    # Zera todas as colunas dinâmicas (charges) desta linha antes de reescrever
     for col in df.columns:
         if col not in {
             "key",
@@ -1077,7 +1121,7 @@ def write_wide_row(df: pd.DataFrame, job: dict, breakdown: dict | None) -> pd.Da
         }:
             df.loc[i, col] = pd.NA
 
-    # escreve os valores (já normalizados para USD quando possível)
+    # Escreve os valores no formato "<CUR> <charge_name>"
     for c in charges_for_csv:
         cur = c.get("currency") or "UNK"
         name = c.get("charge_name") or "Unknown"
@@ -1086,7 +1130,6 @@ def write_wide_row(df: pd.DataFrame, job: dict, breakdown: dict | None) -> pd.Da
         df.loc[i, col] = val
 
     return df
-
 
 def load_wide_csv(path: Path) -> pd.DataFrame:
     if path.exists():
@@ -1435,7 +1478,7 @@ def run_one_job(page, job: dict) -> dict | None:
 
         # NOVO: se aparecer "Retry", vai clicando até sumir antes de procurar os cards
         press_retry_until_gone(
-            page, total_timeout_sec=120, interval_sec=1.5
+            page, total_timeout_sec=45, interval_sec=0.2
         )
 
         # *** NOVO: espera os cards efetivamente aparecerem ***

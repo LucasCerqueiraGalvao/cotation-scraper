@@ -1,0 +1,15 @@
+[05:14:55] Total de jobs carregados: 226 (ordenados por prioridade).
+[05:14:56] Iniciando login na Maersk...
+[05:15:00] Cookies: banner ausente (ok).
+[05:15:18] Login: sucesso, URL atual: https://www.maersk.com/portaluser/oidc/callback?code=jRCnT91RZv6AsrYP13jAag7uqJo&iss=https%3A%2F%2Fiam.maersk.com%2Facm%2Foauth2%2Fmau&state=undefined&client_id=portaluser
+Traceback (most recent call last):
+  File "C:\Users\lucas\Documents\Projects\professional\Cotation Scrapers\maersk_instant_quote.py", line 1571, in <module>
+    main()
+  File "C:\Users\lucas\Documents\Projects\professional\Cotation Scrapers\maersk_instant_quote.py", line 1529, in main
+    log(
+  File "C:\Users\lucas\Documents\Projects\professional\Cotation Scrapers\maersk_instant_quote.py", line 53, in log
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.12_3.12.2800.0_x64__qbz5n2kfra8p0\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\u2192' in position 50: character maps to <undefined>

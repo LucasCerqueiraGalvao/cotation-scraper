@@ -4,7 +4,7 @@ import sys
 
 scripts = [
     ("cma", "cma_instant_quote_batch.py"),
-    ("hapag", "hapag_instant_quote.py"),
+    ("hapag", "teste.py"),
     ("maersk", "maersk_instant_quote.py")
 ]
 
