@@ -18,3 +18,5 @@ artifacts/
 
 # environment
 .env
+
+.screens/
