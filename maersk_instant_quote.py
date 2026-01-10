@@ -30,7 +30,7 @@ COMMODITY_XPATH        = '/html/body/div[2]/main/section/div/div[2]/div[2]/form/
 
 # I/O
 ARTIFACTS        = Path("artifacts")
-INPUT_XLSX       = ARTIFACTS / "input" / "maersk_jobs.xlsx"
+INPUT_XLSX       = ARTIFACTS / "input" / "maersk_jobs_teste.xlsx"
 OUT_DIR          = ARTIFACTS / "output"
 OUT_CSV          = OUT_DIR / "maersk_breakdowns.csv"   # formato "wide"
 RUN_LOG_CSV      = OUT_DIR / "maersk_run_log.csv"
@@ -639,6 +639,235 @@ def wait_for_results_cards(page, timeout_sec: int = RESULTS_TIMEOUT_SEC) -> bool
         time.sleep(0.25)
     return False
 
+SEL_RETRY_HOST  = "mc-button[data-test='pricing-search-again']"
+SEL_RETRY_INNER = SEL_RETRY_HOST + " >> button[part='button']"
+
+def _is_visible(loc) -> bool:
+    try:
+        return loc is not None and loc.count() > 0 and loc.first.is_visible()
+    except Exception:
+        return False
+
+def _results_visible(page) -> bool:
+    try:
+        if page.locator('[data-test="offer-cards"]:visible').count() > 0:
+            return True
+        if page.locator(".product-offer-card:visible").count() > 0:
+            return True
+        if page.get_by_role("button", name=re.compile(r"^\s*Price\s+details\s*$", re.I)).count() > 0:
+            return True
+    except Exception:
+        pass
+    return False
+
+DEBUG_RETRY = True  # <-- liga/desliga os logs extras
+DEBUG_RETRY_SCREENSHOT = False  # salva prints em /screens
+
+SEL_RETRY_HOST  = "mc-button[data-test='pricing-search-again']"
+SEL_RETRY_INNER = SEL_RETRY_HOST + " >> button[part='button']"
+
+def _safe_count(loc) -> int:
+    try:
+        return loc.count()
+    except Exception:
+        return -1
+
+def _safe_visible(loc) -> bool:
+    try:
+        return loc.count() > 0 and loc.first.is_visible()
+    except Exception:
+        return False
+
+def debug_retry_state(page, tag: str = "") -> None:
+    if not DEBUG_RETRY:
+        return
+
+    try:
+        role = page.get_by_role("button", name=re.compile(r"^\s*Retry\s*$", re.I))
+        host = page.locator(SEL_RETRY_HOST)
+        inner = page.locator(SEL_RETRY_INNER)
+
+        log(
+            "RETRY-DEBUG"
+            f" tag='{tag}'"
+            f" url='{page.url}'"
+            f" | role(count={_safe_count(role)}, visible={_safe_visible(role)})"
+            f" | host(count={_safe_count(host)}, visible={_safe_visible(host)})"
+            f" | inner(count={_safe_count(inner)}, visible={_safe_visible(inner)})"
+        )
+
+        # Probe via JS (confirma se existe shadowRoot e se encontra o button)
+        probe = page.evaluate(
+            """
+            (sel) => {
+              const host = document.querySelector(sel);
+              if (!host) return {host:false};
+              const root = host.shadowRoot;
+              const btn  = root ? root.querySelector("button[part='button']") : null;
+              return {
+                host: true,
+                hasShadow: !!root,
+                btn: !!btn,
+                btnText: btn ? (btn.innerText || btn.textContent || "").trim() : null,
+                ariaLabel: btn ? btn.getAttribute("aria-label") : null,
+                disabled: btn ? (btn.disabled || btn.getAttribute("disabled") !== null) : null
+              };
+            }
+            """,
+            SEL_RETRY_HOST,
+        )
+        log(f"RETRY-DEBUG probe={probe}")
+
+        if DEBUG_RETRY_SCREENSHOT:
+            ts = int(time.time() * 1000)
+            page.screenshot(path=f"screens/retry_debug_{tag}_{ts}.png", full_page=True)
+            log(f"RETRY-DEBUG screenshot=screens/retry_debug_{tag}_{ts}.png")
+
+    except Exception as e:
+        log(f"RETRY-DEBUG erro ao inspecionar estado ({type(e).__name__}: {e})")
+
+def _click_retry(page) -> bool:
+    """
+    Clique no Retry com logs detalhados.
+    Retorna True se acredita que clicou, False se falhou.
+    """
+    debug_retry_state(page, "before_click")
+
+    # 1) Inner (shadow) - o mais confiável aqui
+    btn = page.locator(SEL_RETRY_INNER).first
+    if _safe_visible(btn):
+        try:
+            btn.scroll_into_view_if_needed(timeout=800)
+        except Exception:
+            pass
+
+        # Trial click (ver se é clicável)
+        try:
+            btn.click(timeout=1500, trial=True)
+            log("RETRY-DEBUG inner trial=OK")
+        except Exception as e:
+            log(f"RETRY-DEBUG inner trial=FAIL ({type(e).__name__}: {e})")
+
+        try:
+            btn.click(timeout=1500)
+            log("RETRY-DEBUG click=OK via inner")
+            debug_retry_state(page, "after_click_inner_ok")
+            return True
+        except Exception as e:
+            log(f"RETRY-DEBUG click=FAIL via inner ({type(e).__name__}: {e})")
+            try:
+                btn.click(timeout=1500, force=True)
+                log("RETRY-DEBUG click=OK via inner force=True")
+                debug_retry_state(page, "after_click_inner_force_ok")
+                return True
+            except Exception as e2:
+                log(f"RETRY-DEBUG click=FAIL via inner force ({type(e2).__name__}: {e2})")
+
+    # 2) Role fallback
+    role_btn = page.get_by_role("button", name=re.compile(r"^\s*Retry\s*$", re.I)).first
+    if _safe_visible(role_btn):
+        try:
+            role_btn.scroll_into_view_if_needed(timeout=800)
+        except Exception:
+            pass
+
+        try:
+            role_btn.click(timeout=1500, trial=True)
+            log("RETRY-DEBUG role trial=OK")
+        except Exception as e:
+            log(f"RETRY-DEBUG role trial=FAIL ({type(e).__name__}: {e})")
+
+        try:
+            role_btn.click(timeout=1500)
+            log("RETRY-DEBUG click=OK via role")
+            debug_retry_state(page, "after_click_role_ok")
+            return True
+        except Exception as e:
+            log(f"RETRY-DEBUG click=FAIL via role ({type(e).__name__}: {e})")
+            try:
+                role_btn.click(timeout=1500, force=True)
+                log("RETRY-DEBUG click=OK via role force=True")
+                debug_retry_state(page, "after_click_role_force_ok")
+                return True
+            except Exception as e2:
+                log(f"RETRY-DEBUG click=FAIL via role force ({type(e2).__name__}: {e2})")
+
+    # 3) JS fallback
+    try:
+        ok = page.evaluate(
+            """
+            (sel) => {
+              const host = document.querySelector(sel);
+              if (!host) return false;
+              const root = host.shadowRoot || host;
+              const b = root.querySelector("button[part='button']");
+              if (b) { b.click(); return true; }
+              return false;
+            }
+            """,
+            SEL_RETRY_HOST,
+        )
+        log(f"RETRY-DEBUG click via JS => {ok}")
+        debug_retry_state(page, "after_click_js")
+        return bool(ok)
+    except Exception as e:
+        log(f"RETRY-DEBUG JS click=FAIL ({type(e).__name__}: {e})")
+
+    debug_retry_state(page, "after_click_all_failed")
+    return False
+
+def wait_for_results_or_retry(
+    page,
+    timeout_sec: int,
+    max_retry_clicks: int = 10,
+    poll_sec: float = 0.25,
+) -> tuple[bool, int]:
+
+    start = time.time()
+    retry_clicks = 0
+    last_debug = 0.0
+
+    while time.time() - start < timeout_sec:
+        # loga estado a cada ~2s pra não spammar infinito
+        if DEBUG_RETRY and (time.time() - last_debug) > 2.0:
+            debug_retry_state(page, "loop")
+            last_debug = time.time()
+
+        # 1) resultados
+        if _results_visible(page):
+            log(f"Resultados visíveis. Retry clicado {retry_clicks}x.")
+            return True, retry_clicks
+
+        # 2) retry aparece?
+        retry_inner = page.locator(SEL_RETRY_INNER).first
+        retry_role  = page.get_by_role("button", name=re.compile(r"^\s*Retry\s*$", re.I)).first
+        retry_host  = page.locator(SEL_RETRY_HOST).first
+
+        retry_is_visible = _safe_visible(retry_inner) or _safe_visible(retry_role) or _safe_visible(retry_host)
+
+        if retry_is_visible:
+            retry_clicks += 1
+            log(f"Retry apareceu! tentativa #{retry_clicks}/{max_retry_clicks}")
+
+            ok_click = _click_retry(page)  # essa função já tenta inner -> role -> JS
+            log(f"Retry click result: {'OK' if ok_click else 'FAIL'}")
+
+            if retry_clicks >= max_retry_clicks:
+                log("⚠️ atingiu limite de retries sem resultado.")
+                return False, retry_clicks
+
+            time.sleep(min(2.0, 0.6 * (1.5 ** (retry_clicks - 1))))
+            try:
+                page.wait_for_load_state("networkidle", timeout=2500)
+            except Exception:
+                pass
+            continue
+
+        # 3) não apareceu ainda — espera e tenta de novo
+        time.sleep(poll_sec)
+
+    log("⚠️ Timeout esperando resultados/Retry.")
+    return False, retry_clicks
 
 def open_first_price_details(page, idx_card_prefer=0, timeout_ms=10000) -> bool:
     """
@@ -1264,7 +1493,7 @@ def prioritize_jobs(jobs: list[dict], wide_df: pd.DataFrame) -> list[dict]:
 # ----------------------------------------------------------------------
 def read_jobs_xlsx(xlsx_path: Path) -> list[dict]:
     """
-    Lê artifacts/input/maersk_jobs.xlsx
+    Lê artifacts/input/maersk_jobs_teste.xlsx
     Espera colunas: 'ORIGEM' e 'PORTO DE DESTINO'
     """
     if not xlsx_path.exists():
@@ -1296,128 +1525,6 @@ def read_jobs_xlsx(xlsx_path: Path) -> list[dict]:
 # ----------------------------------------------------------------------
 # Função para lidar com botão Retry
 # ----------------------------------------------------------------------
-def press_retry_until_gone(
-    page, total_timeout_sec=120, interval_sec=1.2, max_clicks=120
-) -> bool:
-    """
-    Enquanto existir um botão 'Retry' visível, clica nele repetidamente.
-    Retorna True se o botão sumiu (ou nunca existiu); False se ainda restar 'Retry'
-    após o prazo/limite.
-    """
-    start = time.time()
-    clicks = 0
-
-    def _locate_retry():
-        # 1) papel acessível (muitas vezes já atravessa o shadow)
-        by_role = page.get_by_role(
-            "button", name=re.compile(r"^\s*Retry\s*$", re.I)
-        )
-        if by_role.count() > 0 and by_role.first.is_visible():
-            return ("role", by_role.first)
-
-        # 2) host do componente (mc-button tem data-test estável)
-        host = page.locator(
-            "mc-button[data-test='pricing-search-again']"
-        ).first
-        if host.count() > 0 and host.is_visible():
-            return ("host", host)
-
-        # 3) botão real dentro do shadowRoot
-        inner = page.locator(
-            "mc-button[data-test='pricing-search-again'] >> button[part='button']"
-        ).first
-        if inner.count() > 0 and inner.is_visible():
-            return ("inner", inner)
-
-        return (None, None)
-
-    while time.time() - start < total_timeout_sec and clicks < max_clicks:
-        kind, target = _locate_retry()
-        if not target:
-            if clicks > 0:
-                log(f"Retry: botão sumiu após {clicks} clique(s).")
-            else:
-                log("Retry: botão não apareceu.")
-            return True
-
-        # Tentar rolar p/ viewport
-        try:
-            target.scroll_into_view_if_needed(timeout=600)
-        except Exception:
-            pass
-
-        clicked = False
-        try:
-            target.click(timeout=800)  # tentativa normal
-            clicked = True
-        except Exception:
-            try:
-                target.click(timeout=800, force=True)  # força o clique
-                clicked = True
-            except Exception:
-                # 3) JS: clica no <button part="button"> dentro do shadowRoot
-                try:
-                    ok = page.evaluate(
-                        """
-                        (sel) => {
-                          const host = document.querySelector(sel);
-                          if (!host) return false;
-                          const root = host.shadowRoot || host;
-                          const b = root.querySelector('button[part="button"]');
-                          if (b) { b.click(); return true; }
-                          return false;
-                        }
-                    """,
-                        "mc-button[data-test='pricing-search-again']",
-                    )
-                    clicked = bool(ok)
-                except Exception:
-                    clicked = False
-
-                # 4) bounding box (último recurso)
-                if not clicked:
-                    try:
-                        el = target.element_handle()
-                        box = el.bounding_box() if el else None
-                        if box:
-                            page.mouse.click(
-                                box["x"] + box["width"] / 2,
-                                box["y"] + box["height"] / 2,
-                            )
-                            clicked = True
-                    except Exception:
-                        pass
-
-        clicks += 1
-        log(
-            f"Retry: clique #{clicks} ({'ok' if clicked else 'falhou'}) via {kind or 'fallback'}."
-        )
-
-        # pequeno backoff p/ página reagir / re-render
-        time.sleep(interval_sec)
-
-    # Checagem final
-    still_role = page.get_by_role(
-        "button", name=re.compile(r"^\s*Retry\s*$", re.I)
-    )
-    still_host = page.locator("mc-button[data-test='pricing-search-again']")
-    still_inner = page.locator(
-        "mc-button[data-test='pricing-search-again'] >> button[part='button']"
-    )
-    still_there = (
-        still_role.count() > 0 and still_role.first.is_visible()
-    ) or (still_host.count() > 0 and still_host.first.is_visible()) or (
-        still_inner.count() > 0 and still_inner.first.is_visible()
-    )
-
-    if still_there:
-        log(
-            f"⚠️ Retry: ainda presente após {clicks} cliques e {int(time.time()-start)}s."
-        )
-        return False
-
-    log(f"Retry: botão sumiu (total cliques: {clicks}).")
-    return True
 
 # ----------------------------------------------------------------------
 # Orquestra um job (uma linha do Excel) com tolerância a erro
@@ -1476,16 +1583,19 @@ def run_one_job(page, job: dict) -> dict | None:
             label_for_log="Data (Earliest departure)",
         )
 
-        # NOVO: se aparecer "Retry", vai clicando até sumir antes de procurar os cards
-        press_retry_until_gone(
-            page, total_timeout_sec=45, interval_sec=0.2
+        ok, retry_clicks = wait_for_results_or_retry(
+            page,
+            timeout_sec=RESULTS_TIMEOUT_SEC,
+            max_retry_clicks=10,
+            poll_sec=0.25,
         )
 
-        # *** NOVO: espera os cards efetivamente aparecerem ***
-        if not wait_for_results_cards(page, timeout_sec=RESULTS_TIMEOUT_SEC):
+        if not ok:
             return {
-                "__error": f"Resultados não apareceram em {RESULTS_TIMEOUT_SEC}s."
+                "__error": f"Resultados não apareceram em {RESULTS_TIMEOUT_SEC}s "
+                        f"(Retry clicado {retry_clicks}x)."
             }
+
 
         if not open_first_price_details(
             page, timeout_ms=RESULTS_TIMEOUT_SEC * 1000

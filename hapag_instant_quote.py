@@ -307,12 +307,12 @@ def fill_origin_destination_and_date(page, origin_code: str, dest_code: str):
     _fill_location_with_dropdown(page, "end-input", dest_code, "destino")
     time.sleep(1)
 
-    # DATA – hoje + 7 dias
-    log("Preenchendo data (hoje + 7)...")
+    # DATA – hoje + 14 dias
+    log("Preenchendo data (hoje + 14)...")
     date_input = page.locator('input[data-testid="validity-input"]')
     date_input.wait_for(timeout=30000)
 
-    date_str = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
+    date_str = (datetime.now() + timedelta(days=14)).strftime("%Y-%m-%d")
     date_input.click()
     date_input.fill(date_str)
 
@@ -848,6 +848,7 @@ def _clean_currency_code(x) -> str:
     m = re.search(r"([A-Z]{3})", s)
     return m.group(1) if m else ""
 
+
 def convert_currency_columns_to_usd_in_df(
     df: pd.DataFrame,
     rates_usd_base: Dict[str, float],
@@ -865,43 +866,21 @@ def convert_currency_columns_to_usd_in_df(
       - rates_usd_base["EUR"] = 0.92 significa 1 USD = 0.92 EUR
       - Para converter 60 EUR -> USD: 60 / 0.92 = 65.217...
 
-    Regras gerais:
+    Regras:
       - Se Curr for USD/vazio/MULTI -> não converte
       - Se não existir rate pra moeda -> não converte
       - Se keep_original=True -> cria colunas "* | Orig" antes de sobrescrever
 
-    REGRA NOVA (o que você pediu):
-      - NÃO converter especificamente o THC de destino dentro de Import Surcharges:
-        "Import Surcharges | Terminal Handling Charge Dest. | 20STD"
-        (aceita também "Dest." e variações de espaço/pontuação)
-      - Ou seja: mantém VALOR e MOEDA originais nessas colunas.
-
     Retorna: (df_convertido, quantidade_de_células_convertidas)
     """
-    import re
-
     rates = {k.upper(): float(v) for k, v in rates_usd_base.items()}
     rates["USD"] = 1.0
 
     converted_cells = 0
 
-    # ------------------------------------------------------------------
-    # PADRÃO A SER IGNORADO (THC Dest)
-    # - Mantém robusto contra variações: "Dest," / "Dest." e espaços
-    # - O "value_col" (coluna numérica) tem esse formato:
-    #   "Import Surcharges | Terminal Handling Charge Dest. | 20STD"
-    # ------------------------------------------------------------------
-    THC_DEST_SKIP_PATTERN = re.compile(
-        r"^Import Surcharges \| Terminal Handling Charge Dest[.,]?\s*\| 20STD$"
-    )
-
     for curr_col in df.columns:
         value_col = None
 
-        # --------------------------------------------------------------
-        # Encontra o par (coluna de valor <-> coluna de moeda)
-        # Ex.: "Import Surcharges | X | 20STD | Curr" -> value_col = "... | 20STD"
-        # --------------------------------------------------------------
         if curr_col.endswith(" | Curr"):
             value_col = curr_col[:-7]  # remove " | Curr"
         elif curr_col.endswith(" Curr"):
@@ -910,15 +889,6 @@ def convert_currency_columns_to_usd_in_df(
             continue
 
         if not value_col or value_col not in df.columns:
-            continue
-
-        # --------------------------------------------------------------
-        # REGRA NOVA: pular conversão do THC de destino (Import Surcharges)
-        # Isso faz com que:
-        # - df[value_col] permaneça no valor original
-        # - df[curr_col] permaneça na moeda original
-        # --------------------------------------------------------------
-        if THC_DEST_SKIP_PATTERN.search(value_col):
             continue
 
         # prepara séries
@@ -963,6 +933,7 @@ def convert_currency_columns_to_usd_in_df(
         converted_cells += int(mask2.sum())
 
     return df, converted_cells
+
 
 def convert_currency_columns_in_csv_to_usd(
     csv_path,
