@@ -30,7 +30,7 @@ COMMODITY_XPATH        = '/html/body/div[2]/main/section/div/div[2]/div[2]/form/
 
 # I/O
 ARTIFACTS        = Path("artifacts")
-INPUT_XLSX       = ARTIFACTS / "input" / "maersk_jobs_teste.xlsx"
+INPUT_XLSX       = ARTIFACTS / "input" / "maersk_jobs.xlsx"
 OUT_DIR          = ARTIFACTS / "output"
 OUT_CSV          = OUT_DIR / "maersk_breakdowns.csv"   # formato "wide"
 RUN_LOG_CSV      = OUT_DIR / "maersk_run_log.csv"
@@ -573,7 +573,7 @@ def set_price_owner(page, owner="I am the price owner", label_for_log="Price own
         log(f"⚠️ {label_for_log}: falha ({type(e).__name__}).")
 
 
-def set_date_plus(page, days=7, label_for_log="Data (Earliest departure)"):
+def set_date_plus(page, days=14, label_for_log="Data (Earliest departure)"):
     loc = page.locator(SEL_DATE).first
     if loc.count() == 0:
         loc = page.get_by_label(re.compile(r"Earliest departure", re.I)).first
@@ -1493,7 +1493,7 @@ def prioritize_jobs(jobs: list[dict], wide_df: pd.DataFrame) -> list[dict]:
 # ----------------------------------------------------------------------
 def read_jobs_xlsx(xlsx_path: Path) -> list[dict]:
     """
-    Lê artifacts/input/maersk_jobs_teste.xlsx
+    Lê artifacts/input/maersk_jobs.xlsx
     Espera colunas: 'ORIGEM' e 'PORTO DE DESTINO'
     """
     if not xlsx_path.exists():
@@ -1629,7 +1629,7 @@ def main():
     default_container   = os.getenv("MAERSK_CONTAINER",   "20 Dry")
     default_weight_kg   = int(os.getenv("MAERSK_WEIGHT_KG", "26000"))
     default_price_owner = os.getenv("MAERSK_PRICE_OWNER", "I am the price owner")
-    default_date_plus   = int(os.getenv("MAERSK_DATE_PLUS_DAYS", "7"))
+    default_date_plus   = int(os.getenv("MAERSK_DATE_PLUS_DAYS", "14"))
     keep_open           = int(os.getenv("KEEP_OPEN_SECS", "30"))
 
     # Lê jobs do XLSX
