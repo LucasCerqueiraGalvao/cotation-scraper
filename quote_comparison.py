@@ -109,7 +109,7 @@ def build_hapag_map_from_columns(columns) -> dict:
 
 # CMA: no seu CSV atual só tem total_all_in
 CMA_MAP = {
-    "ocean_freight": ["total_all_in"],
+    "ocean_freight": ["valores"],
     "export_surcharges": ["total_all_in"],
     "freight_surcharges": ["total_all_in"],
     "import_surcharges": ["total_all_in"],
@@ -126,11 +126,11 @@ MAERSK_MAP = {
         "USD Export Service",
     ],
     "freight_surcharges": [
-        "USD Container Protect Unlimited",
-        "USD Container Protect Essential",
-        "USD Emission Surcharge for SPOT Bookings",
+        "USD Emission Surcharge for SPOT Bookings"
     ],
     "import_surcharges": [
+        "USD Container Protect Unlimited",
+        "USD Container Protect Essential",
         "USD Inland Haulage Import",
         "USD Documentation fee - Destination",
         "USD Import Service",
