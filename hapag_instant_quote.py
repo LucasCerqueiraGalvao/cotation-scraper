@@ -353,29 +353,73 @@ def select_container_and_weight(page, weight_kg: int = 26000):
 # ----------------------------------------------------------------------
 def select_spot_offer(page):
     """
-    Agora: abre o Price Breakdown do card Quick Quotes Spot (SEM clicar em Select).
-    Mantém o mesmo nome pra não precisar mexer no resto do fluxo.
+    Abre o Price Breakdown priorizando o card Quick Quotes Spot.
+    Se o Spot estiver indisponivel/desabilitado, usa o card Quick Quotes.
     """
-    log("Abrindo Price Breakdown do Spot...")
+    log("Abrindo Price Breakdown...")
 
-    # pega o card Spot de forma bem estável
-    spot_card = page.locator(
-        'div.offer-card:has(button[data-testid="offer-card-select-button-spot"])'
-    ).first
-    spot_card.wait_for(state="visible", timeout=20000)
+    offer_charges = page.locator(".offer-charges").first
+    page.locator("div.offer-card").first.wait_for(state="visible", timeout=30000)
 
-    # botão dentro do card (tem o texto em span.block)
-    pb_btn = spot_card.locator('button:has(span.block:has-text("Price Breakdown"))').first
-    pb_btn.wait_for(state="visible", timeout=20000)
-    pb_btn.scroll_into_view_if_needed()
+    def _click_breakdown_from_card(card, card_name: str):
+        # evita clicar em botoes desabilitados (ex.: Spot com "We cannot fulfill your request")
+        btn = card.locator(
+            'button:has(span.block:has-text("Price Breakdown")):not([disabled]):not(.disabled)'
+        ).first
+        if btn.count() == 0:
+            raise RuntimeError(f"Price Breakdown habilitado nao encontrado no card {card_name}.")
 
-    # às vezes Quasar/overlay pode “travar” click normal; por isso force
-    pb_btn.click(force=True)
+        btn.wait_for(state="visible", timeout=10000)
+        btn.scroll_into_view_if_needed()
+        btn.click(force=True, timeout=7000)
+        offer_charges.wait_for(state="visible", timeout=20000)
+        log(f"Price Breakdown aberto via card {card_name}.")
 
-    # painel com as tabelas
-    page.locator(".offer-charges").first.wait_for(timeout=20000)
+    candidates = [
+        # 1) prioriza Spot
+        (
+            "Quick Quotes Spot",
+            page.locator('div.offer-card:has(h1:has-text("Quick Quotes Spot"))').first,
+        ),
+        # 2) fallback para Quick Quotes normal (QQ)
+        (
+            "Quick Quotes",
+            page.locator('div.offer-card:has(button[data-testid="offer-card-select-button-qq"])').first,
+        ),
+    ]
 
+    errors = []
+    for card_name, card in candidates:
+        if card.count() == 0:
+            errors.append(f"{card_name}: card nao encontrado")
+            continue
 
+        try:
+            _click_breakdown_from_card(card, card_name)
+            return
+        except Exception as e:
+            errors.append(f"{card_name}: {e!r}")
+            log(f"{card_name}: Price Breakdown indisponivel. Tentando proximo card...")
+
+    try:
+        # fallback final: qualquer card nao desabilitado com botao habilitado
+        global_btn = page.locator(
+            'div.offer-card:not(.offer-card--disabled) '
+            'button:has(span.block:has-text("Price Breakdown")):not([disabled]):not(.disabled)'
+        ).first
+        if global_btn.count() == 0:
+            raise RuntimeError("Nenhum Price Breakdown habilitado encontrado no fallback global.")
+
+        global_btn.wait_for(state="visible", timeout=10000)
+        global_btn.scroll_into_view_if_needed()
+        global_btn.click(force=True, timeout=7000)
+        offer_charges.wait_for(state="visible", timeout=20000)
+        log("Price Breakdown aberto via fallback global.")
+        return
+    except Exception as e:
+        errors.append(f"fallback_global: {e!r}")
+
+    raise RuntimeError("Falha ao abrir Price Breakdown. " + " | ".join(errors))
 
 def open_spot_price_breakdown(page):
     """
