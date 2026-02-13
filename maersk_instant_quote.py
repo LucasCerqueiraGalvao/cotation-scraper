@@ -1,5 +1,6 @@
 # maersk_book_fill_fast.py
 import os, re, time, calendar, json
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -13,11 +14,13 @@ from functools import lru_cache
 # ----------------------------------------------------------------------
 # Configs e caminhos
 # ----------------------------------------------------------------------
+
 HUB_URL   = "https://www.maersk.com/hub/"
 BOOK_URL  = "https://www.maersk.com/book/"
 LOGIN_URL = "https://accounts.maersk.com/ocean-maeu/auth/login?nonce=l57ZO6eIFuhBPTfq0nmI&scope=openid%20profile%20email&client_id=portaluser&redirect_uri=https%3A%2F%2Fwww.maersk.com%2Fportaluser%2Foidc%2Fcallback&response_type=code&code_challenge=LAAwusgt4i5sfIYW1m2ZQQYxZlWq60yvWPld0KbjclI"
 
 # Selectors
+
 SEL_ALLOW_ALL          = '[data-test="coi-allow-all-button"]'
 SEL_ORIGIN             = "#mc-input-origin"
 SEL_DESTINATION        = "#mc-input-destination"
@@ -25,7 +28,7 @@ SEL_WEIGHT             = 'input[placeholder="Enter cargo weight"]:visible, input
 SEL_DATE               = '#mc-input-earliestDepartureDatePicker:visible, input[name="earliestDepartureDatePicker"]:visible'
 SEL_CONTAINER_VISIBLE  = 'input[placeholder="Select container type and size"]:visible'
 
-# Commodity — preferir o acessível; manter XPath como fallback
+# Commodity â€” preferir o acessÃ­vel; manter XPath como fallback
 COMMODITY_XPATH        = '/html/body/div[2]/main/section/div/div[2]/div[2]/form/mc-card[2]/fieldset/span/mc-c-commodity//div/div/div/div/div/div/div/div/div/slot/input'
 
 # I/O
@@ -35,22 +38,81 @@ OUT_DIR          = ARTIFACTS / "output"
 OUT_CSV          = OUT_DIR / "maersk_breakdowns.csv"   # formato "wide"
 RUN_LOG_CSV      = OUT_DIR / "maersk_run_log.csv"
 
-SCREENS          = Path("screens")
+# âœ… ALTERADO: SCREENS agora Ã© o caminho absoluto que vocÃª pediu
+SCREENS = Path(r"C:\Users\lucas\Documents\Projects\professional\Cotation Scrapers\screens")
 
 for p in [ARTIFACTS, ARTIFACTS/"input", OUT_DIR, SCREENS]:
     p.mkdir(parents=True, exist_ok=True)
 
-# Timeout maior para esperar os cards de resultado (ajustável via .env)
+# Timeout maior para esperar os cards de resultado (ajustÃ¡vel via .env)
 RESULTS_TIMEOUT_SEC = int(os.getenv("MAERSK_RESULTS_TIMEOUT_SEC", "45"))
 
-# Taxa aproximada COP → USD (ajuste conforme quiser)
+# Taxa aproximada COP â†’ USD (ajuste conforme quiser)
 COP_TO_USD_APPROX = 0.00025   # COP 1 = 0.00025 USD  (exemplo realista)
+
+# ----------------------------------------------------------------------
+# âœ… NOVO: Screenshot helpers (sempre com origem/destino/horÃ¡rio)
+# ----------------------------------------------------------------------
+_WIN_BAD_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1F]+')
+
+def _safe_part(s: str, max_len: int = 60) -> str:
+    s = "" if s is None else str(s).strip()
+    s = _WIN_BAD_CHARS_RE.sub("_", s)
+    s = re.sub(r"\s+", "_", s)
+    s = s.strip("._-")
+    if not s:
+        s = "NA"
+    return s[:max_len]
+
+def save_quote_screenshot(page, job: dict, stage: str) -> Path | None:
+    """
+    Salva print SEMPRE com:
+      - origem
+      - destino
+      - horÃ¡rio (timestamp)
+    e um stage pra diferenciar (offers/no_results/no_price_details/etc).
+    """
+    try:
+        origin = _safe_part(job.get("origin", "NA"), 60)
+        dest   = _safe_part(job.get("destination", "NA"), 60)
+        ts     = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        stage  = _safe_part(stage, 40)
+
+        # Nome final (evita ficar gigante)
+        fname = f"maersk__{stage}__{ts}__{origin}__{dest}.png"
+        out   = SCREENS / fname
+
+        # garantia de diretÃ³rio
+        SCREENS.mkdir(parents=True, exist_ok=True)
+
+        # tenta garantir que a Ã¡rea de ofertas esteja na viewport
+        try:
+            page.locator(".product-offer-card").first.scroll_into_view_if_needed(timeout=1200)
+        except Exception:
+            pass
+
+        page.screenshot(path=str(out), full_page=True)
+        log(f"ðŸ“¸ Screenshot salvo: {out}")
+        return out
+    except Exception as e:
+        log(f"âš ï¸ Screenshot falhou ({type(e).__name__}: {e})")
+        return None
 
 # ----------------------------------------------------------------------
 # Utils gerais
 # ----------------------------------------------------------------------
 def log(msg: str) -> None:
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+    line = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
+    try:
+        print(line)
+    except UnicodeEncodeError:
+        # Evita travar execução por caracteres não representáveis no codepage do terminal.
+        safe_line = line.encode(sys.stdout.encoding or "cp1252", errors="replace").decode(
+            sys.stdout.encoding or "cp1252",
+            errors="replace",
+        )
+        print(safe_line)
 
 def dd_mmm_yyyy_en(dt: datetime) -> str:
     return f"{dt.day:02d} {calendar.month_abbr[dt.month]} {dt.year}"
@@ -93,7 +155,7 @@ def clamp_date_to_min_max(page, loc, target_dt: datetime) -> datetime:
     return dt
 
 def accept_cookies_quick(page) -> None:
-    # botão direto
+    # botÃ£o direto
     try:
         page.locator(SEL_ALLOW_ALL).click(timeout=800)
         log("Cookies: Allow all clicado.")
@@ -103,7 +165,7 @@ def accept_cookies_quick(page) -> None:
     # JS do CookieInformation
     try:
         if page.evaluate("() => window.CookieInformation?.submitAllCategories?.() || false"):
-            log("Cookies: submitAllCategories() via JS (página).")
+            log("Cookies: submitAllCategories() via JS (pÃ¡gina).")
             return
     except Exception:
         pass
@@ -139,12 +201,194 @@ def wait_input_valid(loc, timeout_ms=4000) -> bool:
         time.sleep(0.12)
     return False
 
+def close_unexpected_modal(page, context: str = "") -> bool:
+    """
+    Fecha modais/cards inesperados que podem aparecer sozinhos e bloquear o fluxo.
+    Retorna True se tentou fechar algo.
+    """
+
+    def _handle_previous_booking_modal() -> bool:
+        """
+        Modal "Select a recently confirmed booking..." (reutilizacao de booking).
+        """
+        modal = page.locator(
+            ".previous-booking-table-desktop:visible, "
+            'mc-c-table[data-test="previous-booking-table"]:visible'
+        ).first
+
+        try:
+            if modal.count() == 0 or not modal.is_visible():
+                return False
+        except Exception:
+            return False
+
+        attempted_local = False
+
+        # 1) Preferir botoes de descarte/fechamento para nao reutilizar dados
+        negative_patterns = [
+            r"(dont|don't|do not|no thanks|skip|cancel|close|dismiss|not now|ignore)",
+            r"(nao|não|fechar|cancelar|pular|dispensar|agora nao|agora não)",
+            r"(nao reutilizar|não reutilizar|sem reutilizar|novo booking|nova cotacao|nova cotação)",
+        ]
+        for patt in negative_patterns:
+            try:
+                btn = modal.get_by_role("button", name=re.compile(patt, re.I)).first
+                if btn.count() > 0 and btn.is_visible():
+                    attempted_local = True
+                    try:
+                        btn.click(timeout=1500)
+                    except Exception:
+                        btn.click(timeout=1500, force=True)
+                    time.sleep(0.2)
+                    return True
+            except Exception:
+                pass
+
+        # 2) Tenta Escape
+        try:
+            page.keyboard.press("Escape")
+            attempted_local = True
+            time.sleep(0.2)
+            try:
+                if modal.count() == 0 or not modal.is_visible():
+                    return True
+            except Exception:
+                return True
+        except Exception:
+            pass
+
+        # 3) Fallback: botao de continuar/reutilizar (desbloqueia fluxo)
+        positive_patterns = [
+            r"(continue|reuse|re-use|use booking|select booking)",
+            r"(continuar|reutilizar|usar booking|selecionar booking)",
+        ]
+        for patt in positive_patterns:
+            try:
+                btn = modal.get_by_role("button", name=re.compile(patt, re.I)).first
+                if btn.count() > 0 and btn.is_visible():
+                    attempted_local = True
+                    try:
+                        btn.click(timeout=1500)
+                    except Exception:
+                        btn.click(timeout=1500, force=True)
+                    time.sleep(0.2)
+                    return True
+            except Exception:
+                pass
+
+        # 4) Ultimo recurso: primeiro botao visivel do modal
+        try:
+            any_btn = modal.locator("button:visible").first
+            if any_btn.count() > 0 and any_btn.is_visible():
+                attempted_local = True
+                try:
+                    any_btn.click(timeout=1500)
+                except Exception:
+                    any_btn.click(timeout=1500, force=True)
+                time.sleep(0.2)
+                return True
+        except Exception:
+            pass
+
+        return attempted_local
+
+    def _has_blocking_modal() -> bool:
+        try:
+            if page.locator(
+                ".previous-booking-table-desktop:visible, "
+                'mc-c-table[data-test="previous-booking-table"]:visible'
+            ).count() > 0:
+                return True
+        except Exception:
+            pass
+
+        try:
+            if page.locator('[data-test="offer-modal-close-icon"]:visible, mc-button.close-icon:visible').count() > 0:
+                return True
+        except Exception:
+            pass
+
+        try:
+            if page.locator("[role='dialog']:visible, mc-modal:visible, mc-dialog:visible").count() > 0:
+                return True
+        except Exception:
+            pass
+
+        try:
+            if page.locator(
+                ".body-wrapper:visible button[aria-label*='close' i], "
+                ".body-wrapper:visible button[aria-label*='fechar' i], "
+                ".body-wrapper:visible button[aria-label*='times-circle' i]"
+            ).count() > 0:
+                return True
+        except Exception:
+            pass
+
+        return False
+
+    if not _has_blocking_modal():
+        return False
+
+    msg_ctx = f" ({context})" if context else ""
+    log(f"Modal inesperado detectado{msg_ctx}. Tentando fechar...")
+
+    close_selectors = [
+        '[data-test="offer-modal-close-icon"] >>> button[part="button"]',
+        '[data-test="offer-modal-close-icon"]',
+        'mc-button.close-icon >>> button[part="button"]',
+        'mc-button.close-icon',
+        "[role='dialog'] button[aria-label*='close' i]",
+        "[role='dialog'] button[aria-label*='fechar' i]",
+        "[role='dialog'] button[aria-label*='times-circle' i]",
+        ".body-wrapper button[aria-label*='close' i]",
+        ".body-wrapper button[aria-label*='fechar' i]",
+        ".body-wrapper button[aria-label*='times-circle' i]",
+    ]
+
+    attempted = False
+    for _ in range(3):
+        # Trata explicitamente o modal de "re-use booking details"
+        try:
+            if _handle_previous_booking_modal():
+                attempted = True
+        except Exception:
+            pass
+
+        for sel in close_selectors:
+            try:
+                btn = page.locator(sel).first
+                if btn.count() > 0 and btn.is_visible():
+                    attempted = True
+                    try:
+                        btn.click(timeout=1200)
+                    except Exception:
+                        btn.click(timeout=1200, force=True)
+                    time.sleep(0.2)
+            except Exception:
+                pass
+
+        try:
+            page.keyboard.press("Escape")
+            attempted = True
+        except Exception:
+            pass
+
+        time.sleep(0.25)
+        if not _has_blocking_modal():
+            log(f"Modal inesperado fechado{msg_ctx}.")
+            return attempted
+
+    if _has_blocking_modal():
+        log(f"Modal inesperado permaneceu aberto{msg_ctx}.")
+
+    return attempted
+
 # ----------------------------------------------------------------------
 # Login Maersk
 # ----------------------------------------------------------------------
 def login_maersk(page, username: str, password: str, timeout_ms: int = 30000) -> bool:
     """
-    Faz login na Maersk usando a tela de login padrão.
+    Faz login na Maersk usando a tela de login padrÃ£o.
     Usa os web-components mc-input/mc-button atravessando o Shadow DOM.
     """
     log("Iniciando login na Maersk...")
@@ -180,7 +424,7 @@ def login_maersk(page, username: str, password: str, timeout_ms: int = 30000) ->
     pass_input.click()
     pass_input.fill(password)
 
-    # Botão "Log in"
+    # BotÃ£o "Log in"
     clicked = False
     try:
         btn = page.get_by_role("button", name=re.compile(r"^\s*Log\s*in\s*$", re.I)).first
@@ -199,7 +443,7 @@ def login_maersk(page, username: str, password: str, timeout_ms: int = 30000) ->
             clicked = False
 
     if not clicked:
-        log("⚠️ Login: não consegui clicar no botão 'Log in'.")
+        log("âš ï¸ Login: nÃ£o consegui clicar no botÃ£o 'Log in'.")
         return False
 
     # Espera sair da tela /auth/login
@@ -211,13 +455,12 @@ def login_maersk(page, username: str, password: str, timeout_ms: int = 30000) ->
         log(f"Login: sucesso, URL atual: {page.url}")
         return True
     except Exception:
-        log(f"⚠️ Login: aparentemente não saiu da tela de login (URL: {page.url}).")
+        log(f"âš ï¸ Login: aparentemente nÃ£o saiu da tela de login (URL: {page.url}).")
         return False
 
 # ----------------------------------------------------------------------
-# Ações de preenchimento
+# AÃ§Ãµes de preenchimento
 # ----------------------------------------------------------------------
-
 def fill_autocomplete(
     page,
     selector,
@@ -228,16 +471,18 @@ def fill_autocomplete(
     wait_opts_ms=1000,
 ) -> bool:
     """
-    Autocomplete genérico (Origem/Destino) mais parecido com set_commodity:
+    Autocomplete genÃ©rico (Origem/Destino) mais parecido com set_commodity:
     - digita o texto
-    - espera o dropdown de opções
+    - espera o dropdown de opÃ§Ãµes
     - tenta clicar numa option que contenha o texto
     - fallback: ArrowDown+Enter + retries
     """
+    close_unexpected_modal(page, f"antes de preencher {label}")
+
     loc = page.locator(selector).first
     loc.wait_for(state="visible", timeout=8000)
 
-    # garante que está na viewport
+    # garante que estÃ¡ na viewport
     try:
         loc.scroll_into_view_if_needed(timeout=800)
     except Exception:
@@ -247,7 +492,7 @@ def fill_autocomplete(
     _clear(loc)
     loc.fill(text)
 
-    # pequena espera inicial para API começar a responder
+    # pequena espera inicial para API comeÃ§ar a responder
     time.sleep(wait_before_enter)
 
     # tenta descobrir o listbox vinculado via aria-controls (mais preciso)
@@ -259,7 +504,7 @@ def fill_autocomplete(
     if listbox_id:
         opts = page.locator(f'#{listbox_id} [role="option"]')
     else:
-        # fallback mais genérico (como em set_commodity)
+        # fallback mais genÃ©rico (como em set_commodity)
         opts = page.locator('[role="option"]')
 
     # espera as options aparecerem
@@ -272,7 +517,7 @@ def fill_autocomplete(
                 break
         except Exception:
             pass
-        # dá um nudge pra abrir o dropdown se ainda não abriu
+        # dÃ¡ um nudge pra abrir o dropdown se ainda nÃ£o abriu
         try:
             loc.press("ArrowDown")
         except Exception:
@@ -280,7 +525,7 @@ def fill_autocomplete(
         time.sleep(0.15)
 
     if appeared:
-        # tenta achar uma option que contenha o texto digitado (código UNLOCODE, cidade, etc.)
+        # tenta achar uma option que contenha o texto digitado (cÃ³digo UNLOCODE, cidade, etc.)
         try:
             match_opt = opts.filter(has_text=re.compile(re.escape(text), re.I)).first
             if match_opt.count() > 0 and match_opt.is_visible():
@@ -288,7 +533,7 @@ def fill_autocomplete(
                 if wait_input_valid(loc, 4000):
                     log(f"{label}: option que casa '{text}' selecionada.")
                     return True
-            # se não achar match específico, clica na primeira visível
+            # se nÃ£o achar match especÃ­fico, clica na primeira visÃ­vel
             first_opt = opts.first
             if first_opt.count() > 0 and first_opt.is_visible():
                 first_opt.click()
@@ -298,7 +543,7 @@ def fill_autocomplete(
         except Exception:
             pass
 
-    # se não conseguiu usar dropdown, cai pro comportamento antigo
+    # se nÃ£o conseguiu usar dropdown, cai pro comportamento antigo
     try:
         loc.click()
     except Exception:
@@ -329,20 +574,20 @@ def fill_autocomplete(
                 time.sleep(0.12)
             loc.press("Enter")
             if wait_input_valid(loc, 2500):
-                log(f"{label}: '{text}' confirmado após retry.")
+                log(f"{label}: '{text}' confirmado apÃ³s retry.")
                 return True
         except Exception:
             pass
 
-    log(f"⚠️ {label}: não confirmou '{text}' (campo permaneceu inválido).")
+    log(f"âš ï¸ {label}: nÃ£o confirmou '{text}' (campo permaneceu invÃ¡lido).")
     return False
 
 import re, time  # redundante mas inofensivo
 
 def set_commodity(page, text: str, wait_opts_ms: int = 5000) -> bool:
     """
-    Preenche o campo Commodity (combobox dentro de <mc-c-commodity>) e seleciona uma opção.
-    Retorna True se conseguiu selecionar, False caso contrário.
+    Preenche o campo Commodity (combobox dentro de <mc-c-commodity>) e seleciona uma opÃ§Ã£o.
+    Retorna True se conseguiu selecionar, False caso contrÃ¡rio.
     """
     # 1) Tenta por acessibilidade (combobox 'Commodity' ou 'Mercadoria')
     loc = None
@@ -359,7 +604,7 @@ def set_commodity(page, text: str, wait_opts_ms: int = 5000) -> bool:
         ).first
         loc.wait_for(state="visible", timeout=6000)
 
-    # Garante que está na viewport
+    # Garante que estÃ¡ na viewport
     try:
         loc.scroll_into_view_if_needed(timeout=800)
     except Exception:
@@ -394,7 +639,7 @@ def set_commodity(page, text: str, wait_opts_ms: int = 5000) -> bool:
                 break
         except Exception:
             pass
-        # pequeno nudge para disparar dropdown se necessário
+        # pequeno nudge para disparar dropdown se necessÃ¡rio
         try:
             loc.press("ArrowDown")
         except Exception:
@@ -415,12 +660,12 @@ def set_commodity(page, text: str, wait_opts_ms: int = 5000) -> bool:
         # fallback: primeira option
         try:
             opts.first.click()
-            log("Commodity: selecionada primeira opção do listbox.")
+            log("Commodity: selecionada primeira opÃ§Ã£o do listbox.")
             return True
         except Exception:
             pass
 
-    # 6) Últimos recursos: ArrowDown+Enter ou Enter direto
+    # 6) Ãšltimos recursos: ArrowDown+Enter ou Enter direto
     try:
         loc.press("ArrowDown")
         time.sleep(0.15)
@@ -435,9 +680,8 @@ def set_commodity(page, text: str, wait_opts_ms: int = 5000) -> bool:
         log("Commodity: Enter sem dropdown (fallback final).")
         return True
     except Exception:
-        log("⚠️ Commodity: não consegui confirmar.")
+        log("âš ï¸ Commodity: nÃ£o consegui confirmar.")
         return False
-
 
 def set_container(page, text="20 Dry"):
     loc = page.locator(SEL_CONTAINER_VISIBLE).first
@@ -448,7 +692,7 @@ def set_container(page, text="20 Dry"):
     loc.click()
     _clear(loc)
     loc.fill(text)
-    time.sleep(0.2)  # dá tempo do listbox montar
+    time.sleep(0.2)  # dÃ¡ tempo do listbox montar
 
     # tenta clicar na option correta
     try:
@@ -464,15 +708,14 @@ def set_container(page, text="20 Dry"):
             loc.press("Enter")
             log(f"Container: '{text}' confirmado via ArrowDown+Enter (fallback).")
         except Exception as e2:
-            log(f"⚠️ Container: não foi possível selecionar ({type(e2).__name__}).")
-
+            log(f"âš ï¸ Container: nÃ£o foi possÃ­vel selecionar ({type(e2).__name__}).")
 
 def fill_weight(page, selector, kg, label="Peso (kg)") -> bool:
     loc = page.locator(selector).first
     try:
         loc.wait_for(state="visible", timeout=8000)
     except Exception:
-        log(f"⚠️ {label}: campo não visível.")
+        log(f"âš ï¸ {label}: campo nÃ£o visÃ­vel.")
         return False
 
     try:
@@ -486,10 +729,10 @@ def fill_weight(page, selector, kg, label="Peso (kg)") -> bool:
 
     v = int(kg)
     if v < minv:
-        log(f"⚠️ {label}: {v} < min ({minv}). Usando {minv}.")
+        log(f"âš ï¸ {label}: {v} < min ({minv}). Usando {minv}.")
         v = minv
     if v > maxv:
-        log(f"⚠️ {label}: {v} > max ({maxv}). Usando {maxv}.")
+        log(f"âš ï¸ {label}: {v} > max ({maxv}). Usando {maxv}.")
         v = maxv
 
     loc.click()
@@ -522,7 +765,6 @@ def fill_weight(page, selector, kg, label="Peso (kg)") -> bool:
     log(f"{label}: '{v}' definido.")
     return True
 
-
 def set_price_owner(page, owner="I am the price owner", label_for_log="Price owner"):
     # caminho preferido: role=radio (atravessa shadow DOM)
     try:
@@ -532,7 +774,7 @@ def set_price_owner(page, owner="I am the price owner", label_for_log="Price own
             radio.check(timeout=1200)
         except Exception:
             radio.click(timeout=1200, force=True)
-        log(f"{label_for_log}: marcado → '{owner}'.")
+        log(f"{label_for_log}: marcado â†’ '{owner}'.")
         return
     except Exception:
         pass
@@ -542,16 +784,16 @@ def set_price_owner(page, owner="I am the price owner", label_for_log="Price own
         host.wait_for(state="visible", timeout=3000)
         try:
             host.click(timeout=1000)
-            log(f"{label_for_log}: host clicado → '{owner}'.")
+            log(f"{label_for_log}: host clicado â†’ '{owner}'.")
             return
         except Exception:
             ck = host.locator('[part="checkmark"]').first
             ck.click(timeout=1000, force=True)
-            log(f"{label_for_log}: checkmark clicado → '{owner}'.")
+            log(f"{label_for_log}: checkmark clicado â†’ '{owner}'.")
             return
     except Exception:
         pass
-    # último recurso: força via JS
+    # Ãºltimo recurso: forÃ§a via JS
     try:
         value_map = {"i am the price owner": "PO", "select a price owner": "select"}
         val = value_map.get(owner.lower(), "PO")
@@ -568,14 +810,13 @@ def set_price_owner(page, owner="I am the price owner", label_for_log="Price own
         """,
             val,
         )
-        log(f"{label_for_log}: setado via JS → '{owner}'.")
+        log(f"{label_for_log}: setado via JS â†’ '{owner}'.")
     except Exception as e:
-        log(f"⚠️ {label_for_log}: falha ({type(e).__name__}).")
-
+        log(f"âš ï¸ {label_for_log}: falha ({type(e).__name__}).")
 
 def set_date_plus(page, days=14, label_for_log="Data (Earliest departure)") -> datetime:
     """
-    ✅ ALTERADO: agora retorna target_dt (datetime) para ser usado na seleção do offer-card.
+    âœ… ALTERADO: agora retorna target_dt (datetime) para ser usado na seleÃ§Ã£o do offer-card.
     """
     loc = page.locator(SEL_DATE).first
     if loc.count() == 0:
@@ -620,7 +861,7 @@ def set_date_plus(page, days=14, label_for_log="Data (Earliest departure)") -> d
 # ----------------------------------------------------------------------
 def wait_for_results_cards(page, timeout_sec: int = RESULTS_TIMEOUT_SEC) -> bool:
     """
-    Aguarda aparecerem resultados: offer-cards, product-offer-card ou um botão 'Price details'.
+    Aguarda aparecerem resultados: offer-cards, product-offer-card ou um botÃ£o 'Price details'.
     Retorna True se encontrar; False se estourar o timeout.
     """
     deadline = time.time() + timeout_sec
@@ -633,7 +874,7 @@ def wait_for_results_cards(page, timeout_sec: int = RESULTS_TIMEOUT_SEC) -> bool
             if (
                 page.get_by_role(
                     "button",
-                    name=re.compile(r"(Price\s+details|Detalhes\s+do\s+pre[cç]o)", re.I),
+                    name=re.compile(r"(Price\s+details|Detalhes\s+do\s+pre[cÃ§]o)", re.I),
                 ).count()
                 > 0
             ):
@@ -664,7 +905,7 @@ def _results_visible(page) -> bool:
             return True
         if page.locator(".product-offer-card:visible").count() > 0:
             return True
-        if page.get_by_role("button", name=re.compile(r"(Price\s+details|Detalhes\s+do\s+pre[cç]o)", re.I)).count() > 0:
+        if page.get_by_role("button", name=re.compile(r"(Price\s+details|Detalhes\s+do\s+pre[cÃ§]o)", re.I)).count() > 0:
             return True
     except Exception:
         pass
@@ -714,8 +955,9 @@ def debug_retry_state(page, tag: str = "") -> None:
 
         if DEBUG_RETRY_SCREENSHOT:
             ts = int(time.time() * 1000)
-            page.screenshot(path=f"screens/retry_debug_{tag}_{ts}.png", full_page=True)
-            log(f"RETRY-DEBUG screenshot=screens/retry_debug_{tag}_{ts}.png")
+            out = SCREENS / f"retry_debug_{tag}_{ts}.png"
+            page.screenshot(path=str(out), full_page=True)
+            log(f"RETRY-DEBUG screenshot={out}")
 
     except Exception as e:
         log(f"RETRY-DEBUG erro ao inspecionar estado ({type(e).__name__}: {e})")
@@ -727,7 +969,7 @@ def _click_retry(page) -> bool:
     """
     debug_retry_state(page, "before_click")
 
-    # 1) Inner (shadow) - o mais confiável aqui
+    # 1) Inner (shadow) - o mais confiÃ¡vel aqui
     btn = page.locator(SEL_RETRY_INNER).first
     if _safe_visible(btn):
         try:
@@ -821,12 +1063,14 @@ def wait_for_results_or_retry(
     last_debug = 0.0
 
     while time.time() - start < timeout_sec:
+        close_unexpected_modal(page, "aguardando resultados")
+
         if DEBUG_RETRY and (time.time() - last_debug) > 2.0:
             debug_retry_state(page, "loop")
             last_debug = time.time()
 
         if _results_visible(page):
-            log(f"Resultados visíveis. Retry clicado {retry_clicks}x.")
+            log(f"Resultados visÃ­veis. Retry clicado {retry_clicks}x.")
             return True, retry_clicks
 
         retry_inner = page.locator(SEL_RETRY_INNER).first
@@ -843,7 +1087,7 @@ def wait_for_results_or_retry(
             log(f"Retry click result: {'OK' if ok_click else 'FAIL'}")
 
             if retry_clicks >= max_retry_clicks:
-                log("⚠️ atingiu limite de retries sem resultado.")
+                log("âš ï¸ atingiu limite de retries sem resultado.")
                 return False, retry_clicks
 
             time.sleep(min(2.0, 0.6 * (1.5 ** (retry_clicks - 1))))
@@ -855,13 +1099,13 @@ def wait_for_results_or_retry(
 
         time.sleep(poll_sec)
 
-    log("⚠️ Timeout esperando resultados/Retry.")
+    log("âš ï¸ Timeout esperando resultados/Retry.")
     return False, retry_clicks
 
 # ----------------------------------------------------------------------
-# ✅ NOVO: escolher offer-card pela data e clicar em Price details / Detalhes do preço
+# âœ… escolher offer-card pela data e clicar em Price details / Detalhes do preÃ§o
 # ----------------------------------------------------------------------
-PRICE_DETAILS_RE = re.compile(r"(Price\s*details|Detalhes\s*do\s*pre[cç]o)", re.I)
+PRICE_DETAILS_RE = re.compile(r"(Price\s*details|Detalhes\s*do\s*pre[cÃ§]o)", re.I)
 
 MONTH_MAP = {
     # EN
@@ -873,7 +1117,7 @@ MONTH_MAP = {
 
 def _parse_offer_dt(card, target_dt: datetime) -> datetime | None:
     """
-    Lê dia/mês do offer-card (ex.: 19 / JAN) e monta um datetime no mesmo ano do target_dt.
+    LÃª dia/mÃªs do offer-card (ex.: 19 / JAN) e monta um datetime no mesmo ano do target_dt.
     Faz um ajuste simples de ano se ficar muito distante (virada de ano).
     """
     try:
@@ -887,7 +1131,7 @@ def _parse_offer_dt(card, target_dt: datetime) -> datetime | None:
         return None
     day = int(mday.group(0))
 
-    mon = re.sub(r"[^A-Za-zÀ-ÿ]", "", mon_txt).upper()[:3]
+    mon = re.sub(r"[^A-Za-z\u00C0-\u00FF]", "", mon_txt).upper()[:3]
     month = MONTH_MAP.get(mon)
     if not month:
         return None
@@ -897,7 +1141,7 @@ def _parse_offer_dt(card, target_dt: datetime) -> datetime | None:
     except Exception:
         return None
 
-    # Ajuste simples se a diferença for absurda (caso vire o ano)
+    # Ajuste simples se a diferenÃ§a for absurda (caso vire o ano)
     if (dt - target_dt).days > 180:
         dt = datetime(target_dt.year - 1, month, day)
     elif (target_dt - dt).days > 180:
@@ -921,7 +1165,7 @@ def _pagination_info(page) -> tuple[int | None, int | None]:
 
 def _goto_next_offers_page(page) -> bool:
     """
-    Clica em 'Seguinte/Next' na paginação de offers. Retorna True se avançou.
+    Clica em 'Seguinte/Next' na paginaÃ§Ã£o de offers. Retorna True se avanÃ§ou.
     """
     cur, total = _pagination_info(page)
     if cur is None:
@@ -934,7 +1178,6 @@ def _goto_next_offers_page(page) -> bool:
     ).first
 
     if next_btn.count() == 0:
-        # fallback por role (caso mude markup)
         next_btn = page.get_by_role("button", name=re.compile(r"(Seguinte|Next)", re.I)).first
 
     try:
@@ -951,7 +1194,6 @@ def _goto_next_offers_page(page) -> bool:
         except Exception:
             return False
 
-    # Espera o currentpage mudar
     try:
         page.wait_for_function(
             """(cur) => {
@@ -964,7 +1206,6 @@ def _goto_next_offers_page(page) -> bool:
             timeout=6000
         )
     except Exception:
-        # fallback: espera networkidle e segue
         try:
             page.wait_for_load_state("networkidle", timeout=4000)
         except Exception:
@@ -974,7 +1215,7 @@ def _goto_next_offers_page(page) -> bool:
 
 def _goto_page(page, target_page: int) -> bool:
     """
-    Navega na paginação até target_page (clicando Next/Prev).
+    Navega na paginaÃ§Ã£o atÃ© target_page (clicando Next/Prev).
     """
     if target_page <= 0:
         return False
@@ -1014,33 +1255,24 @@ def _goto_page(page, target_page: int) -> bool:
 def open_price_details_closest_to_target(
     page,
     target_dt: datetime,
+    job: dict,  # âœ… NOVO: pra screenshot com origem/destino
     timeout_ms: int = 45000,
 ) -> bool:
     """
-    ✅ NOVO fluxo:
-    - Dentro do .product-offer-card, os offer-cards aparecem em ordem crescente de data.
-    - Seleciona somente offer-cards que têm botão (Price details / Detalhes do preço).
-    - Regra:
-        1) escolhe o PRIMEIRO offer_dt >= target_dt (menor diff não-negativo)
-        2) se não existir, escolhe o offer_dt < target_dt mais próximo (maior abaixo)
-    - Trata paginação (mc-pagination) se existir.
-
-    Retorna True se abriu o painel/tabela; False caso contrário.
+    - Seleciona offer-card mais prÃ³ximo da data alvo e abre Price details.
+    - Se falhar (sem ofertas / sem botÃ£o / etc), salva screenshot COM origem/destino/horÃ¡rio.
     """
-    t0 = time.time()
-
     # Espera resultados aparecerem
     if not wait_for_results_cards(page, timeout_sec=max(5, int(timeout_ms/1000))):
-        log("⚠️ Resultados: não apareceram offer-cards/product-offer-card no tempo.")
+        log("âš ï¸ Resultados: nÃ£o apareceram offer-cards/product-offer-card no tempo.")
+        save_quote_screenshot(page, job, "no_results_cards")
         return False
 
-    # Algumas telas carregam o painel à direita "mais embaixo" - garante view
     try:
         page.locator(".product-offer-card").first.scroll_into_view_if_needed(timeout=1200)
     except Exception:
         pass
 
-    # Debug geral
     try:
         n_prod = page.locator(".product-offer-card").count()
         n_off  = page.locator(".product-offer-card mc-card.offer-cards, .product-offer-card [data-test='offer-cards']").count()
@@ -1051,25 +1283,22 @@ def open_price_details_closest_to_target(
 
     best_below = None  # (page_num, idx_clickable, offer_dt)
 
-    # Vamos avançando páginas até achar o primeiro >= target_dt
-    for _ in range(15):  # safety
+    for _ in range(15):
         cur_page, total_pages = _pagination_info(page)
         cur_page = cur_page or 1
 
-        # Coleta os offer-cards visíveis
         cards = page.locator(".product-offer-card mc-card.offer-cards, .product-offer-card [data-test='offer-cards']")
         if cards.count() == 0:
-            log("⚠️ Resultados: nenhum offer-card encontrado no DOM.")
+            log("âš ï¸ Resultados: nenhum offer-card encontrado no DOM.")
+            save_quote_screenshot(page, job, "no_offer_cards_dom")
             break
 
         clickable_idxs = []
         clickable_dts  = []
 
-        # Itera em ordem (que já é crescente)
         for i in range(cards.count()):
             card = cards.nth(i)
 
-            # tem botão?
             has_btn = False
             try:
                 if card.locator("div[data-test='offer-button'] mc-button").count() > 0:
@@ -1087,11 +1316,9 @@ def open_price_details_closest_to_target(
             clickable_idxs.append(i)
             clickable_dts.append(offer_dt)
 
-            # Regra 1: primeiro >= target
             if offer_dt >= target_dt:
-                log(f"✅ Offer escolhido (>= alvo): {offer_dt.strftime('%d %b %Y')} | alvo={target_dt.strftime('%d %b %Y')}")
+                log(f"âœ… Offer escolhido (>= alvo): {offer_dt.strftime('%d %b %Y')} | alvo={target_dt.strftime('%d %b %Y')}")
 
-                # clica no botão (shadow)
                 btn_inner = card.locator("div[data-test='offer-button'] mc-button >>> button[part='button']").first
                 btn_role  = card.get_by_role("button", name=PRICE_DETAILS_RE).first
                 btn_host  = card.locator("div[data-test='offer-button'] mc-button").first
@@ -1118,10 +1345,10 @@ def open_price_details_closest_to_target(
                             pass
 
                 if not clicked:
-                    log("⚠️ Não consegui clicar no botão de Price details neste offer-card.")
-                    break
+                    log("âš ï¸ NÃ£o consegui clicar no botÃ£o de Price details neste offer-card.")
+                    save_quote_screenshot(page, job, "price_details_click_failed")
+                    return False
 
-                # Espera painel/tabela
                 try:
                     page.get_by_role("tab", name=re.compile(r"Breakdown", re.I)).wait_for(state="visible", timeout=15000)
                     return True
@@ -1131,25 +1358,22 @@ def open_price_details_closest_to_target(
                     page.wait_for_selector('mc-c-table[data-test="priceBreakdown"]', timeout=15000)
                     return True
                 except Exception:
-                    log("⚠️ Cliquei no offer, mas não abriu painel no tempo esperado.")
+                    log("âš ï¸ Cliquei no offer, mas nÃ£o abriu painel no tempo esperado.")
+                    save_quote_screenshot(page, job, "price_details_panel_timeout")
                     return False
 
-            # Regra 2 (abaixo do alvo): guarda o mais próximo abaixo (como é crescente, o último abaixo é o melhor)
             if offer_dt < target_dt:
                 best_below = (cur_page, len(clickable_idxs) - 1, offer_dt)
 
-        # Se não achou >= alvo nesta página, tenta ir pra próxima
         if _goto_next_offers_page(page):
             continue
         else:
             break
 
-    # Se acabou e não achou >= alvo, tenta clicar no best_below
     if best_below:
         best_page, idx_clickable, best_dt = best_below
-        log(f"✅ Nenhum offer >= alvo. Usando o mais próximo abaixo: {best_dt.strftime('%d %b %Y')} (página {best_page})")
+        log(f"âœ… Nenhum offer >= alvo. Usando o mais prÃ³ximo abaixo: {best_dt.strftime('%d %b %Y')} (pÃ¡gina {best_page})")
 
-        # garante que estamos na página correta
         _goto_page(page, best_page)
 
         cards = page.locator(".product-offer-card mc-card.offer-cards, .product-offer-card [data-test='offer-cards']")
@@ -1165,10 +1389,10 @@ def open_price_details_closest_to_target(
                 pass
 
         if not clickables:
-            log("⚠️ Não encontrei offer-cards clicáveis ao voltar para a página do best_below.")
+            log("âš ï¸ NÃ£o encontrei offer-cards clicÃ¡veis ao voltar para a pÃ¡gina do best_below.")
+            save_quote_screenshot(page, job, "no_clickable_offers_best_below")
             return False
 
-        # idx_clickable pode estourar se algo mudou; fallback: último
         if idx_clickable < 0 or idx_clickable >= len(clickables):
             idx_clickable = len(clickables) - 1
 
@@ -1200,7 +1424,8 @@ def open_price_details_closest_to_target(
                     pass
 
         if not clicked:
-            log("⚠️ Falha ao clicar em Price details no best_below.")
+            log("âš ï¸ Falha ao clicar em Price details no best_below.")
+            save_quote_screenshot(page, job, "price_details_click_failed_best_below")
             return False
 
         try:
@@ -1212,18 +1437,12 @@ def open_price_details_closest_to_target(
             page.wait_for_selector('mc-c-table[data-test="priceBreakdown"]', timeout=15000)
             return True
         except Exception:
+            save_quote_screenshot(page, job, "price_details_panel_timeout_best_below")
             return False
 
-    # Falhou total: screenshot
-    try:
-        ts = int(time.time())
-        out = SCREENS / f"no_price_details_{ts}.png"
-        page.screenshot(path=str(out), full_page=True)
-        log(f"📸 Screenshot salvo: {out}")
-    except Exception:
-        pass
-
-    log("Resultados: não encontrei nenhum offer-card com botão 'Price details/Detalhes do preço'.")
+    # âœ… Falhou total: screenshot com origem/destino
+    save_quote_screenshot(page, job, "no_price_details_any_offer")
+    log("Resultados: nÃ£o encontrei nenhum offer-card com botÃ£o 'Price details/Detalhes do preÃ§o'.")
     return False
 
 def ensure_breakdown_tab(page, timeout_ms=12000) -> bool:
@@ -1244,11 +1463,10 @@ def ensure_breakdown_tab(page, timeout_ms=12000) -> bool:
         return False
 
 # ----------------------------------------------------------------------
-# Extração do Breakdown (tabela dentro do Shadow DOM)
+# ExtraÃ§Ã£o do Breakdown (tabela dentro do Shadow DOM)
 # ----------------------------------------------------------------------
-_money_re = re.compile(r"([A-Z]{3})?\s*([\-–]?\s*[\d\.\,]+)")
-
-_money_re = re.compile(r"([A-Z]{3})?\s*([\-–−]?\s*[\d\.,]+)")
+_money_re = re.compile(r"([A-Z]{3})?\s*([\-â€“]?\s*[\d\.\,]+)")
+_money_re = re.compile(r"([A-Z]{3})?\s*([\-â€“âˆ’]?\s*[\d\.,]+)")
 
 def _parse_number_any_locale(num_txt: str) -> float | None:
     if num_txt is None:
@@ -1257,29 +1475,22 @@ def _parse_number_any_locale(num_txt: str) -> float | None:
     s = str(num_txt).strip()
     s = s.replace("\u00a0", " ")  # NBSP
     s = s.replace(" ", "")
-    s = s.replace("–", "-").replace("−", "-")  # dashes
+    s = s.replace("â€“", "-").replace("âˆ’", "-")  # dashes
 
     if not s:
         return None
 
-    # Caso tenha os dois separadores, o ÚLTIMO costuma ser o decimal.
     if "," in s and "." in s:
         if s.rfind(",") > s.rfind("."):
-            # 3.558,00  (decimal = ,)
             s = s.replace(".", "").replace(",", ".")
         else:
-            # 2,044.72  (decimal = .)
             s = s.replace(",", "")
     elif "," in s:
-        # só vírgula
-        # se parece decimal (",dd" ou ",d"), converte; senão trata como milhar
         if re.search(r",\d{1,2}$", s):
             s = s.replace(".", "").replace(",", ".")
         else:
             s = s.replace(",", "")
     elif "." in s:
-        # só ponto
-        # se parece decimal (".dd" ou ".d"), mantém; senão trata como milhar
         if re.search(r"\.\d{1,2}$", s):
             s = s.replace(",", "")
         else:
@@ -1297,7 +1508,6 @@ def normalize_money(s: str):
     txt = " ".join(str(s).split())
     m = _money_re.search(txt)
     if not m:
-        # fallback: tenta extrair moeda no final, se existir
         parts = txt.split()
         if len(parts) >= 2 and parts[-1].isalpha() and len(parts[-1]) == 3:
             cur = parts[-1]
@@ -1310,6 +1520,91 @@ def normalize_money(s: str):
 
     val = _parse_number_any_locale(num)
     return (cur.strip().upper() if cur else None), val
+
+def extract_offer_modal_header(page, timeout_ms: int = 8000) -> dict:
+    """
+    Extrai dados do card aberto por "Price details":
+    - data de partida
+    - data de chegada
+    - tempo de viagem (texto e horas, quando disponÃ­vel)
+    """
+    out = {
+        "departure_date": None,
+        "arrival_date": None,
+        "transit_time": None,
+        "transit_time_hours": None,
+    }
+
+    header = page.locator(".offer-modal-header").first
+    try:
+        header.wait_for(state="visible", timeout=timeout_ms)
+    except Exception:
+        return out
+
+    data = page.evaluate(
+        """
+        (sel) => {
+          const normalize = (txt) => {
+            const s = (txt || "").replace(/\\s+/g, " ").trim();
+            return s || null;
+          };
+
+          const all = [...document.querySelectorAll(sel)];
+          const host =
+            all.find((el) => {
+              const cs = window.getComputedStyle(el);
+              return cs && cs.display !== "none" && cs.visibility !== "hidden";
+            }) || all[0];
+          if (!host) return null;
+
+          const readSiblingText = (testId) => {
+            const label = host.querySelector(`[data-test="${testId}"]`);
+            if (!label) return null;
+            let sib = label.nextElementSibling;
+            while (sib) {
+              const txt = normalize(sib.innerText || sib.textContent || "");
+              if (txt) return txt;
+              sib = sib.nextElementSibling;
+            }
+            return null;
+          };
+
+          const dep = readSiblingText("header-label-departure");
+          const arr = readSiblingText("header-label-arrival");
+
+          let transitText = null;
+          let transitHours = null;
+          const transitLabel = host.querySelector('[data-test="header-label-transit"]');
+          if (transitLabel) {
+            const parent = transitLabel.parentElement || host;
+            const dur = parent.querySelector("mc-c-duration-display");
+            if (dur) {
+              transitText = normalize(dur.innerText || dur.textContent || "");
+              const hoursRaw = Number(dur.getAttribute("durationinhours"));
+              transitHours = Number.isFinite(hoursRaw) ? hoursRaw : null;
+            } else {
+              transitText = readSiblingText("header-label-transit");
+            }
+          }
+
+          return {
+            departureDate: dep,
+            arrivalDate: arr,
+            transitTime: transitText,
+            transitTimeHours: transitHours,
+          };
+        }
+        """,
+        ".offer-modal-header",
+    )
+
+    if isinstance(data, dict):
+        out["departure_date"] = data.get("departureDate")
+        out["arrival_date"] = data.get("arrivalDate")
+        out["transit_time"] = data.get("transitTime")
+        out["transit_time_hours"] = data.get("transitTimeHours")
+
+    return out
 
 def extract_breakdown_table(page) -> dict:
     table_host = page.locator(
@@ -1344,7 +1639,7 @@ def extract_breakdown_table(page) -> dict:
     )
 
     if not rows:
-        return {"__error": "Tabela Breakdown não disponível."}
+        return {"__error": "Tabela Breakdown nÃ£o disponÃ­vel."}
 
     charges = []
     for r in rows["body"]:
@@ -1413,7 +1708,7 @@ def extract_breakdown_table(page) -> dict:
     }
 
 # ----------------------------------------------------------------------
-# Conversão de moedas para USD (via API Frankfurter)
+# ConversÃ£o de moedas para USD (via API Frankfurter)
 # ----------------------------------------------------------------------
 FX_API_BASE = os.getenv("FX_API_BASE", "https://api.frankfurter.dev/v1/latest")
 
@@ -1439,13 +1734,13 @@ def fx_rate_to_usd(from_currency: str | None) -> float | None:
         if rate is not None:
             return float(rate)
 
-        log(f"⚠️ FX: resposta sem rate para {code}->USD. payload={data}")
+        log(f"âš ï¸ FX: resposta sem rate para {code}->USD. payload={data}")
 
     except Exception as e:
-        log(f"⚠️ FX: erro ao buscar {code}->USD ({type(e).__name__}: {e})")
+        log(f"âš ï¸ FX: erro ao buscar {code}->USD ({type(e).__name__}: {e})")
 
     if code == "COP":
-        log("⚠️ FX: usando taxa aproximada para COP -> USD.")
+        log("âš ï¸ FX: usando taxa aproximada para COP -> USD.")
         return COP_TO_USD_APPROX
 
     return None
@@ -1459,7 +1754,7 @@ def amount_to_usd(amount: float | None, from_currency: str | None) -> float | No
     return float(amount) * rate
 
 # ----------------------------------------------------------------------
-# CSV WIDE (dinâmico por charge_name, prefixado por moeda)
+# CSV WIDE (dinÃ¢mico por charge_name, prefixado por moeda)
 # ----------------------------------------------------------------------
 def canonical_key(job: dict) -> str:
     return f"{job['origin'].strip()}|{job['destination'].strip()}"
@@ -1504,6 +1799,12 @@ def write_wide_row(df: pd.DataFrame, job: dict, breakdown: dict | None) -> pd.Da
     df.loc[i, "message"] = ""
     df.loc[i, "quoted_at"] = datetime.now().isoformat(timespec="seconds")
 
+    offer_header = breakdown.get("offer_header") or {}
+    df.loc[i, "offer_departure_date"] = offer_header.get("departure_date")
+    df.loc[i, "offer_arrival_date"] = offer_header.get("arrival_date")
+    df.loc[i, "offer_transit_time"] = offer_header.get("transit_time")
+    df.loc[i, "offer_transit_time_hours"] = offer_header.get("transit_time_hours")
+
     charges = breakdown.get("charges", [])
 
     charges_for_csv: list[dict] = []
@@ -1524,7 +1825,7 @@ def write_wide_row(df: pd.DataFrame, job: dict, breakdown: dict | None) -> pd.Da
             charges_for_csv.append(c2)
         else:
             log(
-                f"⚠️ FX: não foi possível converter {cur_original} -> USD; mantendo valor original no CSV."
+                f"âš ï¸ FX: nÃ£o foi possÃ­vel converter {cur_original} -> USD; mantendo valor original no CSV."
             )
             charges_for_csv.append(c)
 
@@ -1539,6 +1840,10 @@ def write_wide_row(df: pd.DataFrame, job: dict, breakdown: dict | None) -> pd.Da
             "quoted_at",
             "status",
             "message",
+            "offer_departure_date",
+            "offer_arrival_date",
+            "offer_transit_time",
+            "offer_transit_time_hours",
         }:
             df.loc[i, col] = pd.NA
 
@@ -1568,6 +1873,10 @@ def load_wide_csv(path: Path) -> pd.DataFrame:
         "quoted_at",
         "status",
         "message",
+        "offer_departure_date",
+        "offer_arrival_date",
+        "offer_transit_time",
+        "offer_transit_time_hours",
     ]:
         if base_col not in df.columns:
             df[base_col] = pd.Series(dtype="string")
@@ -1595,7 +1904,7 @@ def append_run_log(status: str, job: dict, message: str = ""):
     new.to_csv(RUN_LOG_CSV, index=False, encoding="utf-8-sig")
 
 # ----------------------------------------------------------------------
-# Prioridade dos jobs com base em tentativas e cotações anteriores
+# Prioridade dos jobs com base em tentativas e cotaÃ§Ãµes anteriores
 # ----------------------------------------------------------------------
 def _build_status_map(wide_df: pd.DataFrame) -> dict:
     status_map: dict[str, dict] = {}
@@ -1657,7 +1966,7 @@ def prioritize_jobs(jobs: list[dict], wide_df: pd.DataFrame) -> list[dict]:
 # ----------------------------------------------------------------------
 def read_jobs_xlsx(xlsx_path: Path) -> list[dict]:
     if not xlsx_path.exists():
-        raise FileNotFoundError(f"Arquivo de entrada não encontrado: {xlsx_path}")
+        raise FileNotFoundError(f"Arquivo de entrada nÃ£o encontrado: {xlsx_path}")
     df = pd.read_excel(xlsx_path, engine="openpyxl")
     possible_orig = [
         c for c in df.columns if str(c).strip().lower() in {"origem", "origin"}
@@ -1669,7 +1978,7 @@ def read_jobs_xlsx(xlsx_path: Path) -> list[dict]:
     ]
     if not possible_orig or not possible_dest:
         raise ValueError(
-            "Não encontrei colunas 'ORIGEM' e 'PORTO DE DESTINO' (ou equivalentes)."
+            "NÃ£o encontrei colunas 'ORIGEM' e 'PORTO DE DESTINO' (ou equivalentes)."
         )
 
     col_o = possible_orig[0]
@@ -1683,12 +1992,12 @@ def read_jobs_xlsx(xlsx_path: Path) -> list[dict]:
     return jobs
 
 # ----------------------------------------------------------------------
-# Orquestra um job (uma linha do Excel) com tolerância a erro
+# Orquestra um job (uma linha do Excel) com tolerÃ¢ncia a erro
 # ----------------------------------------------------------------------
 def run_one_job(page, job: dict) -> dict | None:
     """
     Executa o fluxo para 1 job. Retorna o breakdown (dict) em sucesso,
-    ou {"__error": "..."} em falha (para logar motivo específico).
+    ou {"__error": "..."} em falha (para logar motivo especÃ­fico).
     """
     try:
         page.goto(HUB_URL, wait_until="domcontentloaded")
@@ -1698,33 +2007,42 @@ def run_one_job(page, job: dict) -> dict | None:
         except Exception:
             pass
 
+        close_unexpected_modal(page, "inicio do job")
         ok = fill_autocomplete(page, SEL_ORIGIN, job["origin"], "Origem")
         if not ok:
-            return {"__error": f"Origem inválida ou não reconhecida: {job['origin']}"}
+            save_quote_screenshot(page, job, "invalid_origin")
+            return {"__error": f"Origem invÃ¡lida ou nÃ£o reconhecida: {job['origin']}"}
 
+        close_unexpected_modal(page, "apos origem")
         ok = fill_autocomplete(page, SEL_DESTINATION, job["destination"], "Destino")
         if not ok:
-            return {"__error": f"Destino inválido ou não reconhecida: {job['destination']}"}
+            save_quote_screenshot(page, job, "invalid_destination")
+            return {"__error": f"Destino invÃ¡lida ou nÃ£o reconhecida: {job['destination']}"}
 
+        close_unexpected_modal(page, "apos destino")
         ok_com = set_commodity(page, text=job["commodity"])
         if not ok_com:
-            return {"__error": f"Commodity não pôde ser selecionado: '{job['commodity']}'"}
+            save_quote_screenshot(page, job, "commodity_not_selected")
+            return {"__error": f"Commodity nÃ£o pÃ´de ser selecionado: '{job['commodity']}'"}
 
+        close_unexpected_modal(page, "apos commodity")
         set_container(page, text=job["container"])
 
         ok_w = fill_weight(page, SEL_WEIGHT, job["weight_kg"], "Peso (kg)")
         if not ok_w:
-            return {"__error": "Campo de peso não visível/aceito."}
+            save_quote_screenshot(page, job, "weight_not_accepted")
+            return {"__error": "Campo de peso nÃ£o visÃ­vel/aceito."}
 
+        close_unexpected_modal(page, "apos peso")
         set_price_owner(page, owner=job["price_owner"])
 
-        # ✅ agora guardamos a data-alvo real (datetime) para escolher o offer-card correto
         target_dt = set_date_plus(
             page,
             days=job["date_plus_days"],
             label_for_log="Data (Earliest departure)",
         )
 
+        close_unexpected_modal(page, "apos data")
         ok, retry_clicks = wait_for_results_or_retry(
             page,
             timeout_sec=RESULTS_TIMEOUT_SEC,
@@ -1733,26 +2051,48 @@ def run_one_job(page, job: dict) -> dict | None:
         )
 
         if not ok:
+            # âœ… Se nÃ£o achou nada (ou timeout/retry), tira print da tela "sem ter achado nada"
+            save_quote_screenshot(page, job, f"no_results_timeout_retry_{retry_clicks}x")
             return {
-                "__error": f"Resultados não apareceram em {RESULTS_TIMEOUT_SEC}s "
+                "__error": f"Resultados nÃ£o apareceram em {RESULTS_TIMEOUT_SEC}s "
                            f"(Retry clicado {retry_clicks}x)."
             }
 
-        log("✅ Resultados visíveis — escolhendo o offer-card pela data e clicando em Price details...")
+        # âœ… Se achou resultados, tira print do â€œcard/tela com todos os nÃºmerosâ€
+        save_quote_screenshot(page, job, "offers_visible")
 
-        # ✅ SUBSTITUI open_first_price_details por esta nova etapa
+        log("âœ… Resultados visÃ­veis â€” escolhendo o offer-card pela data e clicando em Price details...")
+
+        close_unexpected_modal(page, "antes de escolher offer")
         if not open_price_details_closest_to_target(
-            page, target_dt=target_dt, timeout_ms=RESULTS_TIMEOUT_SEC * 1000
+            page, target_dt=target_dt, job=job, timeout_ms=RESULTS_TIMEOUT_SEC * 1000
         ):
-            return {"__error": "Não encontrei/abri 'Price details' no offer-card mais próximo da data alvo."}
+            # open_price_details jÃ¡ salva screenshot, mas deixo esse aqui como redundÃ¢ncia segura
+            save_quote_screenshot(page, job, "no_price_details")
+            return {"__error": "NÃ£o encontrei/abri 'Price details' no offer-card mais prÃ³ximo da data alvo."}
+
+        offer_header = extract_offer_modal_header(page, timeout_ms=10000)
+        log(f"Card details: partida={offer_header.get('departure_date')} | chegada={offer_header.get('arrival_date')} | tempo={offer_header.get('transit_time')} (horas={offer_header.get('transit_time_hours')})")
 
         if not ensure_breakdown_tab(page):
-            return {"__error": "Aba 'Breakdown' indisponível."}
+            save_quote_screenshot(page, job, "breakdown_tab_missing")
+            return {"__error": "Aba 'Breakdown' indisponÃ­vel."}
 
         bd = extract_breakdown_table(page)
+        if isinstance(bd, dict) and "__error" not in bd:
+            bd["offer_header"] = offer_header
+
+        # se der erro na extraÃ§Ã£o, salva print tambÃ©m
+        if bd and isinstance(bd, dict) and "__error" in bd:
+            save_quote_screenshot(page, job, "breakdown_extract_error")
+        else:
+            # âœ… opcional: print depois de abrir a tabela (caso vocÃª queira evidÃªncia do breakdown tambÃ©m)
+            save_quote_screenshot(page, job, "breakdown_visible")
+
         return bd
 
     except Exception as e:
+        save_quote_screenshot(page, job, "unexpected_exception")
         return {"__error": f"{type(e).__name__}: {e}"}
 
 # ----------------------------------------------------------------------
@@ -1764,7 +2104,7 @@ def main():
     maersk_user = os.getenv("MAERSK_USER")
     maersk_pass = os.getenv("MAERSK_PASS")
     if not maersk_user or not maersk_pass:
-        raise RuntimeError("MAERSK_USER e/ou MAERSK_PASS não configurados no .env")
+        raise RuntimeError("MAERSK_USER e/ou MAERSK_PASS nÃ£o configurados no .env")
 
     default_commodity   = os.getenv("MAERSK_COMMODITY",   "Ceramics, stoneware")
     default_container   = os.getenv("MAERSK_CONTAINER",   "20 Dry")
@@ -1804,7 +2144,7 @@ def main():
 
         ok_login = login_maersk(page, maersk_user, maersk_pass)
         if not ok_login:
-            log("⚠️ Login falhou; encerrando execução.")
+            log("âš ï¸ Login falhou; encerrando execuÃ§Ã£o.")
             return
 
         for idx, job in enumerate(jobs, start=1):
@@ -1815,9 +2155,11 @@ def main():
             job.setdefault("date_plus_days", default_date_plus)
             job["_started_at"] = datetime.now().isoformat(timespec="seconds")
 
-            log(f"--- ({idx}/{len(jobs)}) {job['origin']} → {job['destination']} ---")
+            log(f"--- ({idx}/{len(jobs)}) {job['origin']} â†’ {job['destination']} ---")
 
             if is_blank(job["origin"]) or is_blank(job["destination"]):
+                # aqui nÃ£o tem tela Ãºtil, mas se quiser:
+                # save_quote_screenshot(page, job, "blank_origin_or_destination")
                 job["status"] = "error"
                 job["message"] = "Origem/Destino vazios no Excel."
                 wide_df = write_wide_row(wide_df, job, breakdown=None)
@@ -1829,10 +2171,10 @@ def main():
 
             if not bd or ("__error" in bd):
                 job["status"] = "error"
-                job["message"] = (bd or {}).get("__error", "Falha no fluxo/Breakdown indisponível")
+                job["message"] = (bd or {}).get("__error", "Falha no fluxo/Breakdown indisponÃ­vel")
                 wide_df = write_wide_row(wide_df, job, breakdown=None)
                 append_run_log("error", job, job["message"])
-                log(f"❌ JOB ERRO: {job['origin']} → {job['destination']} | {job['message']}")
+                log(f"âŒ JOB ERRO: {job['origin']} â†’ {job['destination']} | {job['message']}")
             else:
                 job["status"] = "ok"
                 job["message"] = ""
@@ -1842,7 +2184,7 @@ def main():
             save_wide_csv(wide_df, OUT_CSV)
             time.sleep(1.0)
 
-        log(f"✅ Batch concluído. Mantendo aberto por {keep_open}s…")
+        log(f"âœ… Batch concluÃ­do. Mantendo aberto por {keep_open}sâ€¦")
         time.sleep(keep_open)
 
 if __name__ == "__main__":

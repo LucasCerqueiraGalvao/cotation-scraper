@@ -444,6 +444,38 @@ def open_spot_price_breakdown(page):
     page.locator(".offer-charges").first.wait_for(timeout=20000)
 
 
+def extract_estimated_transportation_days(page):
+    """
+    Lê "Estimated Transportation Days" no card de rota já aberto.
+    Retorna int quando possível; senão retorna string; None se não achar.
+    """
+    try:
+        content = page.locator(
+            'div.offer-information__route-days:has(div.hal-data-item__label:has-text("Estimated Transportation Days")) '
+            'div.hal-data-item__content'
+        ).first
+
+        if content.count() == 0:
+            content = page.locator(
+                'div.hal-data-item:has(div.hal-data-item__label:has-text("Estimated Transportation Days")) '
+                'div.hal-data-item__content'
+            ).first
+
+        if content.count() == 0:
+            return None
+
+        txt = (content.inner_text() or "").strip()
+        if not txt:
+            return None
+
+        m = re.search(r"\d+", txt)
+        if m:
+            return int(m.group(0))
+        return txt
+    except Exception:
+        return None
+
+
 def extract_charge_items(page):
     """
     Lê o Price Breakdown (div.offer-charges) e retorna um dicionário
@@ -497,6 +529,11 @@ def extract_charge_items(page):
     root.wait_for(timeout=20000)
 
     charges = {}
+
+    # Campo do card (fora das tabelas do breakdown): Estimated Transportation Days
+    etd = extract_estimated_transportation_days(page)
+    if etd is not None:
+        charges["Estimated Transportation Days"] = etd
 
     # Notes (texto livre)
     try:

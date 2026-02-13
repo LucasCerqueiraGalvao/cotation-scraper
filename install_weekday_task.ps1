@@ -12,7 +12,16 @@ if (-not (Test-Path $cmdPath)) {
     throw "Nao encontrei $cmdPath"
 }
 
-$taskCmd = '"' + $cmdPath + '"'
+# Cria wrapper em caminho sem espacos para evitar erro 0x80070002 no Task Scheduler.
+$wrapperPath = Join-Path $env:USERPROFILE "run_daily_pipeline_task.cmd"
+$wrapperContent = @"
+@echo off
+call "$cmdPath"
+exit /b %ERRORLEVEL%
+"@
+Set-Content -Path $wrapperPath -Value $wrapperContent -Encoding ascii
+
+$taskCmd = $wrapperPath
 
 Write-Host "Criando/atualizando tarefa: $TaskName"
 Write-Host "Comando: $taskCmd"

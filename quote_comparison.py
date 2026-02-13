@@ -1,4 +1,8 @@
 import math
+import os
+import subprocess
+import time
+import unicodedata
 from pathlib import Path
 
 import pandas as pd
@@ -9,14 +13,26 @@ import pandas as pd
 ROOT = Path(r"C:\Users\lucas\Documents\Projects\professional\Cotation Scrapers")
 
 # Breakdowns
-CMA_BREAKDOWNS    = ROOT / r"artifacts\output\cma_breakdowns.csv"
 HAPAG_BREAKDOWNS  = ROOT / r"artifacts\output\hapag_breakdowns.csv"
 MAERSK_BREAKDOWNS = ROOT / r"artifacts\output\maersk_breakdowns.csv"
 
 # Jobs
-CMA_JOBS    = ROOT / r"artifacts\input\cma_jobs.xlsx"
 HAPAG_JOBS  = ROOT / r"artifacts\input\hapag_jobs.xlsx"
 MAERSK_JOBS = ROOT / r"artifacts\input\maersk_jobs.xlsx"
+
+# CMA cotations (fonte final de preco)
+CMA_COTATIONS_FILE = Path(
+    r"C:\Users\lucas\excels\Data Analisys Team - Documentos\Ceramic Customer Freight\cma_cotations.xlsx"
+)
+CMA_REQUIRED_COLUMNS = {
+    "INDEXADOR",
+    "ORIGEM",
+    "PORTO DE DESTINO",
+    "DATA DE SAIDA",
+    "PRECO FINAL (USD)",
+}
+CMA_TRANSIT_COL = "TEMPO DE TRANSPORTE"
+CMA_FREE_TIME_COL = "FREE TIME"
 
 # Flags por rota
 DESTINATION_CHARGES_FILE = ROOT / r"artifacts\input\destination_charges.xlsx"
@@ -48,6 +64,9 @@ CATEGORY_FLAGS = {
 # ----------------------------------------------------------------------
 TIMEZONE = "America/Sao_Paulo"
 MAX_QUOTE_AGE_DAYS = 2  # se quoted_at for mais antigo que isso -> vira NaN (como vazio)
+SYNC_BEFORE_CMA_READ = os.getenv("SYNC_BEFORE_CMA_READ", "1") != "0"
+SYNC_WAIT_TIMEOUT_SEC = int(os.getenv("SYNC_WAIT_TIMEOUT_SEC", "60"))
+SYNC_START_TIMEOUT_SEC = int(os.getenv("SYNC_START_TIMEOUT_SEC", "20"))
 
 
 # ----------------------------------------------------------------------
@@ -107,14 +126,6 @@ def build_hapag_map_from_columns(columns) -> dict:
     return hapag_map
 
 
-# CMA: no seu CSV atual só tem total_all_in
-CMA_MAP = {
-    "ocean_freight": ["valores"],
-    "export_surcharges": ["total_all_in"],
-    "freight_surcharges": ["total_all_in"],
-    "import_surcharges": ["total_all_in"],
-}
-
 # MAERSK
 MAERSK_MAP = {
     "ocean_freight": [
@@ -126,7 +137,11 @@ MAERSK_MAP = {
         "USD Export Service",
     ],
     "freight_surcharges": [
-        "USD Emission Surcharge for SPOT Bookings"
+        "USD Emission Surcharge for SPOT Bookings",
+        "USD Operational Cost Imports",
+        "USD Emergency Risk Surcharge",
+        "USD Emission Surcharge for SPOT Bookings",
+        "USD Peak Season Surcharge",
     ],
     "import_surcharges": [
         "USD Container Protect Unlimited",
@@ -157,6 +172,200 @@ def normalize_indexador_series(s: pd.Series) -> pd.Series:
     return s.map(_norm)
 
 
+def normalize_header_name(name: str) -> str:
+    no_accents = "".join(
+        ch for ch in unicodedata.normalize("NFKD", str(name))
+        if not unicodedata.combining(ch)
+    )
+    return " ".join(no_accents.upper().strip().split())
+
+
+def _is_any_process_running(process_names: list[str]) -> bool:
+    try:
+        out = subprocess.check_output(
+            ["tasklist", "/FO", "CSV", "/NH"],
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+        )
+    except Exception:
+        return False
+
+    out_low = out.lower()
+    return any(name.lower() in out_low for name in process_names)
+
+
+def _find_google_drive_exe() -> Path | None:
+    candidates = []
+    pf = Path(os.environ.get("ProgramFiles", ""))
+    pf86 = Path(os.environ.get("ProgramFiles(x86)", ""))
+    local = Path(os.environ.get("LOCALAPPDATA", ""))
+
+    candidates.extend(
+        [
+            pf / "Google" / "Drive File Stream" / "GoogleDriveFS.exe",
+            pf86 / "Google" / "Drive File Stream" / "GoogleDriveFS.exe",
+            local / "Google" / "DriveFS" / "GoogleDriveFS.exe",
+        ]
+    )
+
+    drivefs_root = local / "Google" / "DriveFS"
+    if drivefs_root.exists():
+        candidates.extend(sorted(drivefs_root.glob("**/GoogleDriveFS.exe"), reverse=True))
+
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
+
+
+def _find_onedrive_exe() -> Path | None:
+    candidates = [
+        Path(os.environ.get("ProgramFiles", "")) / "Microsoft OneDrive" / "OneDrive.exe",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "OneDrive" / "OneDrive.exe",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
+
+
+def ensure_cloud_sync_running(start_timeout_sec: int = SYNC_START_TIMEOUT_SEC) -> str | None:
+    google_proc = ["GoogleDriveFS.exe", "GoogleDriveFS"]
+    onedrive_proc = ["OneDrive.exe", "OneDrive.Sync.Service.exe", "OneDrive"]
+
+    if _is_any_process_running(google_proc):
+        return "google_drive"
+    if _is_any_process_running(onedrive_proc):
+        return "onedrive"
+
+    starter = None
+    provider = None
+
+    gexe = _find_google_drive_exe()
+    if gexe is not None:
+        starter = gexe
+        provider = "google_drive"
+    else:
+        oexe = _find_onedrive_exe()
+        if oexe is not None:
+            starter = oexe
+            provider = "onedrive"
+
+    if starter is None or provider is None:
+        return None
+
+    try:
+        subprocess.Popen([str(starter)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        return None
+
+    deadline = time.time() + max(1, start_timeout_sec)
+    watch = google_proc if provider == "google_drive" else onedrive_proc
+    while time.time() < deadline:
+        if _is_any_process_running(watch):
+            return provider
+        time.sleep(1.0)
+
+    return None
+
+
+def wait_file_stable(file_path: Path, timeout_sec: int = SYNC_WAIT_TIMEOUT_SEC, poll_sec: float = 2.0) -> bool:
+    deadline = time.time() + max(1, timeout_sec)
+    prev_sig = None
+    stable_hits = 0
+
+    while time.time() < deadline:
+        if file_path.exists():
+            try:
+                st = file_path.stat()
+                sig = (st.st_size, st.st_mtime_ns)
+
+                with file_path.open("rb") as f:
+                    _ = f.read(1)
+
+                if sig == prev_sig:
+                    stable_hits += 1
+                    if stable_hits >= 2:
+                        return True
+                else:
+                    stable_hits = 0
+                    prev_sig = sig
+            except Exception:
+                stable_hits = 0
+
+        time.sleep(poll_sec)
+
+    return file_path.exists()
+
+
+def ensure_cma_file_synced(file_path: Path) -> None:
+    if not SYNC_BEFORE_CMA_READ:
+        return
+
+    provider = ensure_cloud_sync_running()
+    if provider:
+        print(f"[sync] sincronizador detectado/iniciado: {provider}.")
+    else:
+        print("[sync] aviso: nao foi possivel detectar/iniciar Google Drive/OneDrive.")
+
+    ok = wait_file_stable(file_path)
+    if ok:
+        print(f"[sync] arquivo pronto para leitura: {file_path}")
+    else:
+        print(f"[sync] aviso: nao consegui confirmar sincronizacao completa: {file_path}")
+
+
+def load_cma_prices(file_path: Path) -> pd.DataFrame:
+    ensure_cma_file_synced(file_path)
+
+    if not file_path.exists():
+        raise FileNotFoundError(f"Arquivo da CMA nao encontrado: {file_path}")
+
+    cma_df = pd.read_excel(file_path)
+    colmap = {}
+    for col in cma_df.columns:
+        normalized = normalize_header_name(col)
+        if normalized not in colmap:
+            colmap[normalized] = col
+
+    missing = CMA_REQUIRED_COLUMNS - set(colmap)
+    if missing:
+        raise ValueError(
+            f"A planilha {file_path} precisa conter as colunas: {sorted(CMA_REQUIRED_COLUMNS)}. "
+            f"Faltando: {sorted(missing)}"
+        )
+
+    rename_map = {
+        colmap["INDEXADOR"]: "indexador",
+        colmap["PRECO FINAL (USD)"]: "cma",
+    }
+    select_cols = ["indexador", "cma"]
+
+    cma_transit_src = colmap.get(CMA_TRANSIT_COL)
+    if cma_transit_src:
+        rename_map[cma_transit_src] = "cma_transit_time"
+        select_cols.append("cma_transit_time")
+
+    cma_free_time_src = colmap.get(CMA_FREE_TIME_COL)
+    if cma_free_time_src:
+        rename_map[cma_free_time_src] = "cma_free_time"
+        select_cols.append("cma_free_time")
+
+    cma_prices = cma_df.rename(columns=rename_map)[select_cols].copy()
+
+    cma_prices["indexador"] = normalize_indexador_series(cma_prices["indexador"])
+    cma_prices["cma"] = pd.to_numeric(cma_prices["cma"], errors="coerce")
+    cma_prices = cma_prices.dropna(subset=["indexador"])
+
+    if "cma_transit_time" not in cma_prices.columns:
+        cma_prices["cma_transit_time"] = pd.NA
+    if "cma_free_time" not in cma_prices.columns:
+        cma_prices["cma_free_time"] = pd.NA
+
+    return cma_prices
+
+
 def sum_cols(df: pd.DataFrame, cols):
     cols = [c for c in cols if c in df.columns]
     if not cols:
@@ -167,6 +376,16 @@ def sum_cols(df: pd.DataFrame, cols):
         .fillna(0)
         .sum(axis=1)
     )
+
+
+def first_non_empty(series: pd.Series):
+    for val in series:
+        if pd.isna(val):
+            continue
+        if str(val).strip() == "":
+            continue
+        return val
+    return pd.NA
 
 
 def best_price_and_carrier(row):
@@ -187,6 +406,28 @@ def best_price_and_carrier(row):
     best_carrier = min(valores_validos, key=valores_validos.get)
     best_price = valores_validos[best_carrier]
     return pd.Series({"best_price": best_price, "best_carrier": best_carrier})
+
+
+def winner_transit_time(row):
+    carrier = row.get("best_carrier")
+    if carrier == "hapag":
+        return row.get("hapag_transit_time")
+    if carrier == "maersk":
+        return row.get("maersk_transit_time")
+    if carrier == "cma":
+        return row.get("cma_transit_time")
+    return pd.NA
+
+
+def winner_free_time(row):
+    carrier = row.get("best_carrier")
+    if carrier == "hapag":
+        return 10
+    if carrier == "maersk":
+        return 14
+    if carrier == "cma":
+        return row.get("cma_free_time")
+    return pd.NA
 
 def compute_carrier_total(
     df: pd.DataFrame,
@@ -419,35 +660,11 @@ for col in [DEST_FLAG_COL_INTERNAL, USA_FLAG_COL_INTERNAL]:
     )
 
 # ----------------------------------------------------------------------
-# 2) Ler breakdowns + jobs por carrier e trazer o indexador
+# 2) Ler dados por carrier e trazer o indexador
 # ----------------------------------------------------------------------
 
-# --- CMA ---
-cma_df = pd.read_csv(CMA_BREAKDOWNS)
-cma_jobs = pd.read_excel(CMA_JOBS)
-if "indexador" in cma_jobs.columns:
-    cma_jobs["indexador"] = normalize_indexador_series(cma_jobs["indexador"])
-
-cma_jobs2 = cma_jobs.rename(columns={"ORIGEM": "ORIGEM_CODE", "PORTO DE DESTINO": "DEST_CODE"})
-
-cma_merged = cma_df.merge(
-    cma_jobs2,
-    left_on=["origin", "destination"],
-    right_on=["ORIGEM_CODE", "DEST_CODE"],
-    how="left",
-)
-
-if "indexador" in cma_merged.columns:
-    cma_merged["indexador"] = normalize_indexador_series(cma_merged["indexador"])
-
-cma_merged = cma_merged.merge(dest_flags, on="indexador", how="left")
-for col in [DEST_FLAG_COL_INTERNAL, USA_FLAG_COL_INTERNAL]:
-    cma_merged[col] = (
-        pd.to_numeric(cma_merged[col], errors="coerce")
-        .fillna(0)
-        .astype(int)
-        .clip(0, 1)
-    )
+# --- CMA (preco final direto da planilha dedicada) ---
+cma_prices = load_cma_prices(CMA_COTATIONS_FILE)
 
 # --- HAPAG ---
 hapag_df = pd.read_csv(HAPAG_BREAKDOWNS)
@@ -520,18 +737,19 @@ hapag_merged["hapag"] = compute_carrier_total(
     usa_flag_col=USA_FLAG_COL_INTERNAL,
 )
 invalidate_old_quotes(hapag_merged, "hapag")
-hapag_group = hapag_merged.groupby("indexador", as_index=False)["hapag"].max()
-
-# CMA: sem extra específico (USA não muda nada na prática pois total_all_in já está no base)
-cma_merged["cma"] = compute_carrier_total(
-    cma_merged,
-    CMA_MAP,
-    dest_flag_col=DEST_FLAG_COL_INTERNAL,
-    dest_extra_cols=None,
-    usa_flag_col=USA_FLAG_COL_INTERNAL,
+if "Estimated Transportation Days" not in hapag_merged.columns:
+    hapag_merged["Estimated Transportation Days"] = pd.NA
+hapag_group = hapag_merged.groupby("indexador", as_index=False).agg(
+    hapag=("hapag", "max"),
+    hapag_transit_time=("Estimated Transportation Days", first_non_empty),
 )
-invalidate_old_quotes(cma_merged, "cma")
-cma_group = cma_merged.groupby("indexador", as_index=False)["cma"].max()
+
+# CMA: usa diretamente PRECO FINAL (USD) da planilha cma_cotations.xlsx
+cma_group = cma_prices.groupby("indexador", as_index=False).agg(
+    cma=("cma", "max"),
+    cma_transit_time=("cma_transit_time", first_non_empty),
+    cma_free_time=("cma_free_time", first_non_empty),
+)
 
 # MAERSK: item específico quando destination charges=1
 MAERSK_DEST_EXTRA = ["USD Terminal Handling Service - Destination"]
@@ -544,7 +762,12 @@ maersk_merged["maersk"] = compute_carrier_total(
     usa_flag_col=USA_FLAG_COL_INTERNAL,
 )
 invalidate_old_quotes(maersk_merged, "maersk")
-maersk_group = maersk_merged.groupby("indexador", as_index=False)["maersk"].max()
+if "offer_transit_time" not in maersk_merged.columns:
+    maersk_merged["offer_transit_time"] = pd.NA
+maersk_group = maersk_merged.groupby("indexador", as_index=False).agg(
+    maersk=("maersk", "max"),
+    maersk_transit_time=("offer_transit_time", first_non_empty),
+)
 
 # ----------------------------------------------------------------------
 # 4) Juntar tudo pela base canônica (rotas da Maersk)
@@ -564,6 +787,8 @@ for col in ["hapag", "cma", "maersk"]:
 best = base.apply(best_price_and_carrier, axis=1)
 base["best_price"] = best["best_price"]
 base["best_carrier"] = best["best_carrier"]
+base["transit_time"] = base.apply(winner_transit_time, axis=1)
+base["free_time"] = base.apply(winner_free_time, axis=1)
 
 base["key"] = base["ORIGEM"].astype(str) + "-" + base["PORTO DE DESTINO"].astype(str)
 
@@ -580,6 +805,8 @@ base = base[
         "maersk",
         "best_price",
         "best_carrier",
+        "transit_time",
+        "free_time",
         "indexador",
     ]
 ]
@@ -597,3 +824,4 @@ base.to_csv(
 )
 
 print(f"Arquivo gerado em: {OUTPUT_FILE}")
+
