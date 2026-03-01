@@ -1,12 +1,12 @@
 ﻿param(
     [string]$TaskName = "CotationScrapers_Daily_2AM",
-    [string]$StartTime = "02:00"
+    [string]$StartTime = "04:20"
 )
 
 $ErrorActionPreference = "Stop"
 
-$projectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$cmdPath = Join-Path $projectDir "run_daily_pipeline.cmd"
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$cmdPath = Join-Path $scriptDir "run_daily_pipeline.cmd"
 
 if (-not (Test-Path $cmdPath)) {
     throw "Nao encontrei $cmdPath"

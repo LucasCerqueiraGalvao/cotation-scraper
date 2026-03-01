@@ -1,4 +1,4 @@
-# hapag_batch_quotes.py
+﻿# hapag_batch_quotes.py
 
 import os
 import csv
@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from datetime import datetime, timedelta
 import re
+import unicodedata
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -15,7 +16,7 @@ from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 # CONFIG BÁSICA
 # ----------------------------------------------------------------------
 
-BASE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 LOGIN_URL = (
     "https://identity.hapag-lloyd.com/hlagwebprod.onmicrosoft.com/"
@@ -35,8 +36,8 @@ LOGIN_URL = (
 
 NEW_QUOTE_URL = "https://www.hapag-lloyd.com/solutions/new-quote/#/simple?language=en"
 
-JOBS_XLSX = BASE_DIR / "artifacts" / "input" / "hapag_jobs.xlsx"
-OUTPUT_CSV = BASE_DIR / "artifacts" / "output" / "hapag_breakdowns.csv"
+JOBS_XLSX = PROJECT_ROOT / "artifacts" / "input" / "hapag_jobs.xlsx"
+OUTPUT_CSV = PROJECT_ROOT / "artifacts" / "output" / "hapag_breakdowns.csv"
 
 # colunas de charge que vamos manter fixas no CSV
 KNOWN_CHARGES = [
@@ -59,15 +60,184 @@ BASE_FIELDS = [
 ALL_FIELDS = BASE_FIELDS + KNOWN_CHARGES
 
 
+_ROUTE_HEADER_RE = re.compile(r"^=== Processando \((\d+)/(\d+)\)\s+(.+?)\s+->\s+(.+?)\s*===$")
+_LOG_CTX = {
+    "job_idx": 0,
+    "job_total": 0,
+    "last_stage_status": None,
+    "last_stage": "ETAPA",
+}
+
+
+def _normalize_for_match(text: str) -> str:
+    if not text:
+        return ""
+    s = unicodedata.normalize("NFKD", str(text))
+    s = s.encode("ascii", errors="ignore").decode("ascii")
+    s = s.lower()
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _counter_label() -> str:
+    idx = int(_LOG_CTX.get("job_idx") or 0)
+    total = int(_LOG_CTX.get("job_total") or 0)
+    if total > 0:
+        return f"({idx}/{total})"
+    return f"({idx}/?)"
+
+
+def _infer_stage(msg_text: str, current_stage: str = "ETAPA") -> str:
+    msg = _normalize_for_match(msg_text)
+    if "login" in msg or "security check" in msg or "cookies" in msg:
+        return "LOGIN"
+    if "csv atualizado" in msg or "processamento concluido" in msg or "job finalizado" in msg:
+        return "RESUMO"
+    if "jobs" in msg or "ordem de execucao" in msg:
+        return "CARGA_JOBS"
+    if "abrindo pagina de cotacao" in msg or "quote page" in msg:
+        return "NAVEGACAO"
+    if "origem" in msg or "start-input" in msg:
+        return "ORIGEM"
+    if "destino" in msg or "end-input" in msg:
+        return "DESTINO"
+    if "data" in msg or "validity-input" in msg:
+        return "DATA"
+    if "container" in msg:
+        return "CONTAINER"
+    if "peso" in msg or "weight" in msg:
+        return "PESO"
+    if "search" in msg or "offer-card" in msg or "spot offer" in msg:
+        return "OFERTAS"
+    if "price breakdown" in msg:
+        return "PRICE_DETAILS"
+    if "breakdown" in msg or "offer-charges" in msg or "extraindo tabelas" in msg:
+        return "BREAKDOWN"
+    return current_stage or "ETAPA"
+
+
+def _infer_status(msg_text: str) -> str:
+    msg = _normalize_for_match(msg_text)
+    error_markers = [
+        "erro",
+        "falha",
+        "falhou",
+        "nao achei",
+        "nao encontrado",
+        "nao encontrada",
+        "no quote",
+        "indisponivel",
+        "erro nao tratado",
+        "spot offer nao encontrado",
+        "sem cotacao",
+        "job finalizado com erro",
+    ]
+    warning_markers = [
+        "timeout",
+        "retry",
+        "nao atingido rapidamente",
+        "tentando",
+        "continuando",
+        "security check detectado",
+    ]
+    ok_markers = [
+        "ok",
+        "sucesso",
+        "concluido",
+        "concluida",
+        "preenchido",
+        "preenchida",
+        "selecionado",
+        "selecionada",
+        "aberto",
+        "aberta",
+        "atualizado",
+        "liberado",
+        "job finalizado com sucesso",
+    ]
+    progress_markers = [
+        "iniciando",
+        "abrindo",
+        "processando",
+        "preenchendo",
+        "aguardando",
+    ]
+
+    if any(m in msg for m in error_markers):
+        return "ERRO"
+    if any(m in msg for m in ok_markers):
+        return "OK"
+    if any(m in msg for m in warning_markers):
+        return "ATENCAO"
+    if any(m in msg for m in progress_markers):
+        return "EM_ANDAMENTO"
+    return "INFO"
+
+
+def _to_structured_terminal_line(msg: str) -> str | None:
+    raw = "" if msg is None else str(msg).strip()
+    if not raw:
+        return None
+
+    m = _ROUTE_HEADER_RE.match(raw)
+    if m:
+        _LOG_CTX["job_idx"] = int(m.group(1))
+        _LOG_CTX["job_total"] = int(m.group(2))
+        _LOG_CTX["last_stage_status"] = None
+        _LOG_CTX["last_stage"] = "INICIO_ROTA"
+        origin = m.group(3).strip()
+        destination = m.group(4).strip()
+        return f"{_counter_label()} {origin} -> {destination}"
+
+    raw_lower = raw.lower()
+    if "ordem de execucao (grupo, data, origem->destino):" in raw_lower:
+        return None
+    if "detalhe no_quote" in raw_lower:
+        return None
+
+    stage = _infer_stage(raw, current_stage=_LOG_CTX.get("last_stage", "ETAPA"))
+    _LOG_CTX["last_stage"] = stage
+    status = _infer_status(raw)
+
+    if status == "INFO":
+        if stage in {"ORIGEM", "DESTINO", "DATA", "CONTAINER", "PESO", "PRICE_DETAILS", "BREAKDOWN"}:
+            status = "OK"
+        elif stage in {"LOGIN", "NAVEGACAO", "OFERTAS", "CARGA_JOBS", "RESUMO"}:
+            status = "EM_ANDAMENTO"
+        else:
+            return None
+
+    event_key = (_LOG_CTX["job_idx"], stage, status)
+    if event_key == _LOG_CTX["last_stage_status"]:
+        return None
+    _LOG_CTX["last_stage_status"] = event_key
+
+    return f"{_counter_label()} | {stage} | {status}"
+
+
 def log(msg: str) -> None:
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+    structured = _to_structured_terminal_line(msg)
+    if structured is None:
+        return
+    print(structured)
+
+
+def parse_env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if value in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    return default
 
 
 # ----------------------------------------------------------------------
 # CREDENCIAIS (.env)
 # ----------------------------------------------------------------------
 
-load_dotenv()
+load_dotenv(PROJECT_ROOT / ".env", override=False)
 HL_USER = os.getenv("HL_USER")
 HL_PASS = os.getenv("HL_PASS")
 
@@ -188,6 +358,22 @@ def _parse_iso_or_none(value):
         return None
 
 
+def _datetime_to_sort_int(dt: datetime) -> int:
+    """
+    Converte datetime em inteiro monotônico para ordenação estável.
+    Não depende de timestamp/epoch para evitar edge-cases com datas muito antigas.
+    """
+    if not isinstance(dt, datetime):
+        return 0
+    return (
+        dt.toordinal() * 86_400_000_000_000
+        + dt.hour * 3_600_000_000_000
+        + dt.minute * 60_000_000_000
+        + dt.second * 1_000_000_000
+        + dt.microsecond * 1_000
+    )
+
+
 
 def build_history_from_rows_cache(rows_cache):
     """
@@ -219,13 +405,13 @@ def wait_cloudflare_if_needed(page, max_wait_sec=120):
     """Se aparecer a tela de 'Security Check', espera você resolver."""
     try:
         page.get_by_text("Security Check", exact=False).wait_for(timeout=5000)
-        print("Cloudflare Security Check detectado.")
-        print(f"Resolve o 'Confirme que é humano' na janela (até {max_wait_sec}s).")
+        log("Cloudflare Security Check detectado.")
+        log(f"Resolve o 'Confirme que é humano' na janela (até {max_wait_sec}s).")
         page.wait_for_function(
             "() => !document.body.innerText.includes('Security Check')",
             timeout=max_wait_sec * 1000,
         )
-        print("Security Check liberado, seguindo...")
+        log("Security Check liberado, seguindo...")
     except PWTimeout:
         pass
     except Exception:
@@ -255,7 +441,7 @@ def login_hapag(page):
     # cookies
     try:
         fr.click("#accept-recommended-btn-handler", timeout=3000)
-        print("Cookies: 'Select All' clicado.")
+        log("Cookies: 'Select All' clicado.")
     except Exception:
         pass
 
@@ -274,7 +460,7 @@ def login_hapag(page):
     except Exception:
         pass
 
-    print("Login Hapag: tentativa concluída.")
+    log("Login Hapag: tentativa concluida.")
 
 
 # ----------------------------------------------------------------------
@@ -282,22 +468,49 @@ def login_hapag(page):
 # ----------------------------------------------------------------------
 def open_quote_page(page):
     log("Abrindo página de cotação...")
-    page.goto(NEW_QUOTE_URL, wait_until="networkidle", timeout=60000)
+    nav_timeout_ms = int(os.getenv("HAPAG_NAV_TIMEOUT_MS", "60000"))
+    wait_until = os.getenv("HAPAG_QUOTE_WAIT_UNTIL", "domcontentloaded").strip() or "domcontentloaded"
+    if wait_until not in {"load", "domcontentloaded", "networkidle", "commit"}:
+        wait_until = "domcontentloaded"
+
+    page.goto(NEW_QUOTE_URL, wait_until=wait_until, timeout=nav_timeout_ms)
+    quote_idle_wait_ms = int(os.getenv("HAPAG_QUOTE_IDLE_WAIT_MS", "2500"))
+    if quote_idle_wait_ms > 0:
+        try:
+            page.wait_for_load_state("networkidle", timeout=quote_idle_wait_ms)
+        except Exception:
+            log("Quote page: networkidle não atingido rapidamente; seguindo.")
     wait_cloudflare_if_needed(page)
 
 
 def _fill_location_with_dropdown(page, testid: str, code: str, label: str):
     log(f"Preenchendo {label} {code}...")
+    action_timeout_ms = int(os.getenv("HAPAG_ACTION_TIMEOUT_MS", "30000"))
+    dropdown_wait_ms = int(os.getenv("HAPAG_DROPDOWN_WAIT_MS", "8000"))
+    poll_ms = int(os.getenv("HAPAG_DROPDOWN_POLL_MS", "250"))
+
     field = page.locator(f'input[data-testid="{testid}"]')
-    field.wait_for(timeout=30000)
+    field.wait_for(timeout=action_timeout_ms)
     field.click()
     field.fill(code)
 
-    # espera o dropdown aparecer e clica na opção com o código
-    page.wait_for_timeout(1500)
+    # Espera o dropdown aparecer e clica na opção com o código.
     option = page.get_by_text(code, exact=False).first
-    option.wait_for(timeout=10000)
+    deadline = time.time() + (dropdown_wait_ms / 1000.0)
+    while time.time() < deadline:
+        try:
+            if option.count() > 0 and option.is_visible():
+                option.click()
+                log(f"{label.capitalize()} preenchida.")
+                return
+        except Exception:
+            pass
+        page.wait_for_timeout(poll_ms)
+
+    # fallback: mantém comportamento antigo para não quebrar.
+    option.wait_for(timeout=action_timeout_ms)
     option.click()
+    log(f"{label.capitalize()} preenchida.")
 
 
 def fill_origin_destination_and_date(page, origin_code: str, dest_code: str):
@@ -321,31 +534,133 @@ def fill_origin_destination_and_date(page, origin_code: str, dest_code: str):
     except Exception:
         page.click("text=Container Type", timeout=30000)
 
-    log("Origem, destino e data preenchidos.")
+    log("Data preenchida.")
 
 
 def select_container_and_weight(page, weight_kg: int = 26000):
+    action_timeout_ms = int(os.getenv("HAPAG_ACTION_TIMEOUT_MS", "30000"))
+
     # container
     log("Selecionando container \"20' General Purpose\"...")
     container = page.locator('[data-testid="container-input"]')
-    container.wait_for(timeout=30000)
+    container.wait_for(timeout=action_timeout_ms)
     container.click()
 
     option = page.get_by_text("20' General Purpose", exact=False).first
-    option.wait_for(timeout=10000)
+    option.wait_for(timeout=action_timeout_ms)
     option.click()
+    log("Container selecionado.")
     time.sleep(1)
 
     # peso + Enter
     log(f"Preenchendo peso {weight_kg} kg e confirmando...")
     weight_input = page.locator('input[data-testid="weight-input"]')
-    weight_input.wait_for(timeout=30000)
+    weight_input.wait_for(timeout=action_timeout_ms)
     weight_input.click()
     weight_input.fill("")
     weight_input.type(str(weight_kg))
     weight_input.press("Enter")
+    log("Peso preenchido.")
 
-    log("Container e peso preenchidos; aguardando resultados...")
+    # Em headless o Enter nem sempre dispara a busca; clicar em Search torna o fluxo consistente.
+    try:
+        search_btn = page.get_by_role("button", name=re.compile(r"^\s*Search\s*$", re.I)).first
+        if search_btn.count() > 0:
+            search_btn.click(timeout=min(5000, action_timeout_ms))
+            log("Botao Search clicado.")
+    except Exception:
+        pass
+
+    log("Aguardando resultados de ofertas...")
+
+
+def wait_offers_ready(page, timeout_ms: int = 45000) -> bool:
+    """
+    Aguarda os cards de oferta ficarem visiveis apos a busca.
+    Retorna True quando os cards aparecem.
+    """
+    deadline = time.time() + (timeout_ms / 1000.0)
+    while time.time() < deadline:
+        try:
+            if page.locator("div.offer-card:visible").count() > 0:
+                log("Ofertas prontas.")
+                return True
+            if page.locator(".offer-card").count() > 0:
+                log("Ofertas prontas.")
+                return True
+        except Exception:
+            pass
+        time.sleep(0.4)
+    return False
+
+
+def wait_price_breakdown_ready(page, timeout_ms: int = 45000, poll_ms: int = 300) -> bool:
+    """
+    Espera inteligente do Price Breakdown:
+    - painel visível
+    - tabelas do breakdown presentes
+    - sem indicadores de loading/skeleton por alguns ciclos
+    """
+    deadline = time.time() + (timeout_ms / 1000.0)
+    panel = page.locator(".offer-charges").first
+    stable_hits = 0
+
+    while time.time() < deadline:
+        panel_visible = False
+        table_count = 0
+        row_count = 0
+        loading_count = 0
+
+        try:
+            panel_visible = panel.count() > 0 and panel.is_visible()
+        except Exception:
+            panel_visible = False
+
+        if panel_visible:
+            try:
+                table_count = panel.locator("table.q-table").count()
+            except Exception:
+                table_count = 0
+            try:
+                row_count = panel.locator("table.q-table tbody tr").count()
+            except Exception:
+                row_count = 0
+
+        try:
+            loading_count += page.locator(".q-inner-loading:visible").count()
+        except Exception:
+            pass
+        try:
+            loading_count += page.locator(".q-spinner:visible").count()
+        except Exception:
+            pass
+        try:
+            loading_count += page.locator(".q-skeleton:visible").count()
+        except Exception:
+            pass
+        try:
+            loading_count += page.locator("[aria-busy='true']:visible").count()
+        except Exception:
+            pass
+
+        ready_by_table = panel_visible and (table_count > 0 or row_count > 0)
+
+        if ready_by_table and loading_count == 0:
+            stable_hits += 1
+            if stable_hits >= 3:
+                return True
+        elif panel_visible and loading_count == 0:
+            # fallback para casos onde o painel abre sem tabela imediatamente,
+            # mas já parou de carregar.
+            stable_hits += 1
+            if stable_hits >= 6:
+                return True
+        else:
+            stable_hits = 0
+
+        page.wait_for_timeout(poll_ms)
+
+    return False
 
 
 # ----------------------------------------------------------------------
@@ -358,8 +673,13 @@ def select_spot_offer(page):
     """
     log("Abrindo Price Breakdown...")
 
-    offer_charges = page.locator(".offer-charges").first
-    page.locator("div.offer-card").first.wait_for(state="visible", timeout=30000)
+    card_visible_timeout_ms = int(os.getenv("HAPAG_CARD_VISIBLE_TIMEOUT_MS", "20000"))
+    breakdown_button_timeout_ms = int(os.getenv("HAPAG_BREAKDOWN_BUTTON_TIMEOUT_MS", "7000"))
+    breakdown_click_timeout_ms = int(os.getenv("HAPAG_BREAKDOWN_CLICK_TIMEOUT_MS", "5000"))
+    breakdown_ready_timeout_ms = int(os.getenv("HAPAG_BREAKDOWN_READY_TIMEOUT_MS", "45000"))
+    breakdown_ready_poll_ms = int(os.getenv("HAPAG_BREAKDOWN_READY_POLL_MS", "300"))
+
+    page.locator("div.offer-card").first.wait_for(state="visible", timeout=card_visible_timeout_ms)
 
     def _click_breakdown_from_card(card, card_name: str):
         # evita clicar em botoes desabilitados (ex.: Spot com "We cannot fulfill your request")
@@ -369,10 +689,15 @@ def select_spot_offer(page):
         if btn.count() == 0:
             raise RuntimeError(f"Price Breakdown habilitado nao encontrado no card {card_name}.")
 
-        btn.wait_for(state="visible", timeout=10000)
+        btn.wait_for(state="visible", timeout=breakdown_button_timeout_ms)
         btn.scroll_into_view_if_needed()
-        btn.click(force=True, timeout=7000)
-        offer_charges.wait_for(state="visible", timeout=20000)
+        btn.click(force=True, timeout=breakdown_click_timeout_ms)
+        if not wait_price_breakdown_ready(
+            page,
+            timeout_ms=breakdown_ready_timeout_ms,
+            poll_ms=breakdown_ready_poll_ms,
+        ):
+            raise RuntimeError(f"Price Breakdown nao ficou pronto no card {card_name}.")
         log(f"Price Breakdown aberto via card {card_name}.")
 
     candidates = [
@@ -410,10 +735,15 @@ def select_spot_offer(page):
         if global_btn.count() == 0:
             raise RuntimeError("Nenhum Price Breakdown habilitado encontrado no fallback global.")
 
-        global_btn.wait_for(state="visible", timeout=10000)
+        global_btn.wait_for(state="visible", timeout=breakdown_button_timeout_ms)
         global_btn.scroll_into_view_if_needed()
-        global_btn.click(force=True, timeout=7000)
-        offer_charges.wait_for(state="visible", timeout=20000)
+        global_btn.click(force=True, timeout=breakdown_click_timeout_ms)
+        if not wait_price_breakdown_ready(
+            page,
+            timeout_ms=breakdown_ready_timeout_ms,
+            poll_ms=breakdown_ready_poll_ms,
+        ):
+            raise RuntimeError("Price Breakdown nao ficou pronto no fallback global.")
         log("Price Breakdown aberto via fallback global.")
         return
     except Exception as e:
@@ -439,9 +769,8 @@ def open_spot_price_breakdown(page):
     breakdown_btn = spot_card.get_by_role("button", name="Price Breakdown")
     breakdown_btn.wait_for(timeout=15000)
     breakdown_btn.click()
-
-    # Painel que contém todas as tabelas do breakdown
-    page.locator(".offer-charges").first.wait_for(timeout=20000)
+    if not wait_price_breakdown_ready(page, timeout_ms=45000, poll_ms=300):
+        raise RuntimeError("Price Breakdown do Spot nao ficou pronto.")
 
 
 def extract_estimated_transportation_days(page):
@@ -649,13 +978,19 @@ def run_single_quote_flow(page, origin: str, destination: str):
         open_quote_page(page)
         fill_origin_destination_and_date(page, origin, destination)
         select_container_and_weight(page, weight_kg=26000)
+        offers_timeout_ms = int(os.getenv("HAPAG_OFFERS_READY_TIMEOUT_MS", "45000"))
+        if not wait_offers_ready(page, timeout_ms=offers_timeout_ms):
+            status = "no_quote"
+            message = "Spot offer nao encontrado ou rota sem cotacao."
+            return {}, status, message
 
-        # tenta achar o Spot; se não tiver, considera "no_quote" e sai
+        # tenta achar o Spot; se nao tiver, considera no_quote e sai
         try:
             select_spot_offer(page)
         except Exception as e:
             status = "no_quote"
-            message = f"Spot offer não encontrado ou rota sem cotação: {e}"
+            message = "Spot offer nao encontrado ou rota sem cotacao."
+            log("Falha ao abrir Spot offer.")
             return {}, status, message
 
         # se conseguiu selecionar o Spot, extrai charges
@@ -700,13 +1035,14 @@ def main():
         key = f"{origin}-{destination}"
         info = history.get(key)
 
-        # GRUPO DE PRIORIDADE:
+        # GRUPO DE PRIORIDADE (alinhado com Maersk):
         # 0 = nunca tentou (nem tentativa nem cotação)
-        # 1 = já teve pelo menos uma cotação success (mais antiga -> mais prioridade)
+        # 1 = já teve sucesso (mais recente -> mais prioridade)
         # 2 = já teve tentativa mas nunca sucesso (mais antiga -> mais prioridade)
         if info is None or not info.get("has_any_attempt", False):
             priority_group = 0
             priority_ts = datetime.min
+            priority_ts_sort = 0
         elif info.get("has_success", False):
             priority_group = 1
             priority_ts = (
@@ -714,9 +1050,11 @@ def main():
                 or info.get("last_attempt_at")
                 or datetime.min
             )
+            priority_ts_sort = -_datetime_to_sort_int(priority_ts)
         else:
             priority_group = 2
             priority_ts = info.get("last_attempt_at") or datetime.min
+            priority_ts_sort = _datetime_to_sort_int(priority_ts)
 
         jobs.append(
             {
@@ -726,6 +1064,7 @@ def main():
                 "key": key,
                 "priority_group": priority_group,
                 "priority_ts": priority_ts,
+                "priority_ts_sort": priority_ts_sort,
             }
         )
 
@@ -733,7 +1072,7 @@ def main():
     jobs.sort(
         key=lambda j: (
             j["priority_group"],
-            j["priority_ts"],
+            j["priority_ts_sort"],
             j["idx"],  # desempate: ordem original no Excel
         )
     )
@@ -746,43 +1085,74 @@ def main():
         )
     )
 
+    hapag_headless = False
+    action_timeout_ms = int(os.getenv("HAPAG_ACTION_TIMEOUT_MS", "30000"))
+    login_timeout_ms = int(os.getenv("HAPAG_LOGIN_TIMEOUT_MS", "60000"))
+    nav_timeout_ms = int(os.getenv("HAPAG_NAV_TIMEOUT_MS", "60000"))
+    viewport_width = int(os.getenv("HAPAG_VIEWPORT_WIDTH", "1366"))
+    viewport_height = int(os.getenv("HAPAG_VIEWPORT_HEIGHT", "768"))
+    locale = os.getenv("HAPAG_LOCALE", "pt-BR")
+    timezone = os.getenv("HAPAG_TIMEZONE", "America/Sao_Paulo")
+    accept_language = os.getenv("HAPAG_ACCEPT_LANGUAGE", "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7")
+    after_login_sleep_sec = float(os.getenv("HAPAG_AFTER_LOGIN_SLEEP_SEC", "2"))
+    keep_open_secs = float(os.getenv("HAPAG_KEEP_OPEN_SECS", "3"))
+    user_data_dir = os.getenv("HAPAG_USER_DATA_DIR", str(PROJECT_ROOT / ".pw-user-data-hapag"))
+    use_stealth = parse_env_bool("HAPAG_STEALTH", default=True)
+    ignore_enable_automation = parse_env_bool("HAPAG_IGNORE_ENABLE_AUTOMATION", default=True)
+
+    log(
+        f"[cfg] headless={hapag_headless} action_timeout_ms={action_timeout_ms} "
+        f"login_timeout_ms={login_timeout_ms} nav_timeout_ms={nav_timeout_ms} "
+        f"viewport={viewport_width}x{viewport_height}"
+    )
+
     with sync_playwright() as p:
-        context = p.chromium.launch_persistent_context(
-            user_data_dir=".pw-user-data-hapag",
-            channel="chrome",
-            headless=False,
-            viewport={"width": 1366, "height": 768},
-            locale="pt-BR",
-            timezone_id="America/Sao_Paulo",
-            args=[
+        context_kwargs = {
+            "user_data_dir": user_data_dir,
+            "channel": "chrome",
+            "headless": hapag_headless,
+            "viewport": {"width": viewport_width, "height": viewport_height},
+            "locale": locale,
+            "timezone_id": timezone,
+            "extra_http_headers": {"Accept-Language": accept_language},
+            "args": [
                 "--disable-blink-features=AutomationControlled",
                 "--disable-infobars",
+                "--disable-dev-shm-usage",
+                "--no-first-run",
+                "--no-default-browser-check",
+                f"--window-size={viewport_width},{viewport_height}",
             ],
-        )
-        context.add_init_script(
-            "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
-        )
+        }
+        if ignore_enable_automation:
+            context_kwargs["ignore_default_args"] = ["--enable-automation"]
+
+        context = p.chromium.launch_persistent_context(**context_kwargs)
+        if use_stealth:
+            context.add_init_script(
+                "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
+            )
 
         # LOGIN (apenas 1 vez)
         login_page = context.new_page()
-        login_page.set_default_timeout(30000)
+        login_page.set_default_timeout(action_timeout_ms)
+        login_page.set_default_navigation_timeout(login_timeout_ms)
         login_hapag(login_page)
 
-        time.sleep(7)
+        time.sleep(max(0.0, after_login_sleep_sec))
 
         # Página reutilizada para todas as cotações
         quote_page = context.new_page()
-        quote_page.set_default_timeout(30000)
+        quote_page.set_default_timeout(action_timeout_ms)
+        quote_page.set_default_navigation_timeout(nav_timeout_ms)
 
-        for j in jobs:
+        total_jobs = len(jobs)
+        for idx, j in enumerate(jobs, start=1):
             origin = j["origin"]
             destination = j["destination"]
             key = j["key"]
 
-            log(
-                f"=== Processando {origin} -> {destination} "
-                f"(grupo={j['priority_group']}, ref={j['priority_ts']}) ==="
-            )
+            log(f"=== Processando ({idx}/{total_jobs}) {origin} -> {destination} ===")
 
             try:
                 charges, status, message = run_single_quote_flow(
@@ -792,6 +1162,13 @@ def main():
                 charges = {}
                 status = "error"
                 message = f"Erro não tratado no fluxo: {e!r}"
+
+            if status == "success":
+                log("Job finalizado com sucesso.")
+            elif status == "no_quote":
+                log("Job finalizado sem cotacao.")
+            else:
+                log("Job finalizado com erro.")
 
             upsert_charges_in_cache(
                 rows_cache=rows_cache,
@@ -806,8 +1183,8 @@ def main():
         # grava o CSV final com 1 linha por key
         flush_rows_cache_to_csv(rows_cache, OUTPUT_CSV)
 
-        log("Processamento concluído. Fechando contexto em 10s...")
-        time.sleep(10)
+        log(f"Processamento concluído. Fechando contexto em {keep_open_secs}s...")
+        time.sleep(max(0.0, keep_open_secs))
         context.close()
 
         # grava o CSV final com 1 linha por key
@@ -1051,3 +1428,4 @@ def convert_currency_columns_in_csv_to_usd(
 
 if __name__ == "__main__":
     main()
+

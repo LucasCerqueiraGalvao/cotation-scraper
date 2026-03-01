@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 import shutil
 
@@ -10,16 +11,28 @@ from openpyxl.worksheet.table import Table, TableStyleInfo
 # 1) CONFIGURACOES GERAIS
 # =========================================
 
-BASE_DIR = Path(__file__).resolve().parent
-load_dotenv(BASE_DIR / ".env", override=True)
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+load_dotenv(PROJECT_ROOT / ".env", override=True)
+
+
+def resolve_env_path(env_name: str, default_path: Path) -> Path:
+    raw = os.getenv(env_name)
+    if not raw:
+        return default_path
+
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        candidate = PROJECT_ROOT / candidate
+    return candidate
 
 # Arquivos locais (onde o pipeline ja grava o CSV)
-CSV_INPUT = BASE_DIR / "artifacts" / "output" / "comparacao_carriers.csv"
-XLSX_OUTPUT = BASE_DIR / "artifacts" / "output" / "comparacao_carriers_cliente.xlsx"
+CSV_INPUT = PROJECT_ROOT / "artifacts" / "output" / "comparacao_carriers.csv"
+XLSX_OUTPUT = PROJECT_ROOT / "artifacts" / "output" / "comparacao_carriers_cliente.xlsx"
 
 # Pasta sincronizada com OneDrive / SharePoint
-SYNC_FOLDER = Path(
-    r"C:\Users\lucas\excels\Data Analisys Team - Documentos\Ceramic Customer Freight"
+SYNC_FOLDER = resolve_env_path(
+    "SYNC_FOLDER",
+    PROJECT_ROOT / "artifacts" / "sync_out",
 )
 
 OBSERVACAO_CLIENTE = (
@@ -30,9 +43,40 @@ OBSERVACAO_CLIENTE = (
 TABLE_LAST_ROW_MIN = 223
 
 
+def formatar_transit_time(value):
+    """Padroniza transit time numerico para '<n> days' sem mexer em textos ja descritivos."""
+    if pd.isna(value):
+        return pd.NA
+
+    if isinstance(value, str):
+        text = " ".join(value.strip().split())
+        if not text:
+            return pd.NA
+        if "day" in text.lower():
+            return text
+
+        numeric_candidate = text.replace(",", ".")
+        parsed = pd.to_numeric(numeric_candidate, errors="coerce")
+        if pd.notna(parsed):
+            number = float(parsed)
+            if number.is_integer():
+                return f"{int(number)} days"
+            return f"{number:g} days"
+        return text
+
+    parsed = pd.to_numeric(value, errors="coerce")
+    if pd.isna(parsed):
+        return value
+
+    number = float(parsed)
+    if number.is_integer():
+        return f"{int(number)} days"
+    return f"{number:g} days"
+
+
 def check_config():
     """Valida se os caminhos basicos existem."""
-    print("DEBUG BASE_DIR:", BASE_DIR)
+    print("DEBUG PROJECT_ROOT:", PROJECT_ROOT)
     print("DEBUG CSV_INPUT:", CSV_INPUT)
     print("DEBUG XLSX_OUTPUT:", XLSX_OUTPUT)
     print("DEBUG SYNC_FOLDER:", SYNC_FOLDER)
@@ -41,11 +85,8 @@ def check_config():
         raise FileNotFoundError(f"CSV de entrada nao encontrado: {CSV_INPUT}")
 
     if not SYNC_FOLDER.exists():
-        raise FileNotFoundError(
-            f"Pasta sincronizada nao encontrada: {SYNC_FOLDER}\n"
-            "Verifique se a sincronizacao do OneDrive esta ativa "
-            "e se o caminho esta correto."
-        )
+        SYNC_FOLDER.mkdir(parents=True, exist_ok=True)
+        print(f"AVISO: pasta de sincronizacao nao existia e foi criada: {SYNC_FOLDER}")
 
 
 def aplicar_layout_planilha(ws, total_linhas_dados: int):
@@ -128,6 +169,7 @@ def gerar_planilha_cliente():
 
     # best_price ja vem como numero por causa do decimal=","
     df_cliente["best_price"] = df_cliente["best_price"] + 100
+    df_cliente["transit_time"] = df_cliente["transit_time"].map(formatar_transit_time)
 
     # Nomes finais do layout cliente.
     df_cliente = df_cliente.rename(

@@ -14,16 +14,16 @@ from playwright.sync_api import (
 # ----------------------------------------------------------------------
 # Caminhos
 # ----------------------------------------------------------------------
-ROOT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-INPUT_JOBS = ROOT_DIR / "artifacts" / "input" / "cma_jobs.xlsx"
+INPUT_JOBS = PROJECT_ROOT / "artifacts" / "input" / "cma_jobs.xlsx"
 
-CSV_OUT_DIR = ROOT_DIR / "artifacts" / "output"
+CSV_OUT_DIR = PROJECT_ROOT / "artifacts" / "output"
 CSV_OUT_DIR.mkdir(parents=True, exist_ok=True)
 CSV_FILE = CSV_OUT_DIR / "cma_breakdowns.csv"
 
 # Pasta fixa de cache/perfil do Playwright
-USER_DATA_DIR = ROOT_DIR / ".pw-user-data-cma"
+USER_DATA_DIR = PROJECT_ROOT / ".pw-user-data-cma"
 USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # ----------------------------------------------------------------------
@@ -220,7 +220,7 @@ def login_cma(page):
     Faz login na CMA no próprio page e, ao final, vai para a tela de Instant Quoting.
     Se já estiver logado e o formulário não aparecer, apenas segue para a tela de cotação.
     """
-    load_dotenv()
+    load_dotenv(PROJECT_ROOT / ".env", override=False)
     email = os.getenv("CMA_USER")
     password = os.getenv("CMA_PASS")
 

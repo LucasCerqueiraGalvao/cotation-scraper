@@ -1,23 +1,26 @@
 ﻿from __future__ import annotations
 
 import argparse
+import os
+import shutil
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Tuple
 
-BASE_DIR = Path(__file__).resolve().parent
-LOG_DIR = BASE_DIR / "artifacts" / "logs"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+LOG_DIR = PROJECT_ROOT / "artifacts" / "logs"
+SCREENS_DIR = PROJECT_ROOT / "screens"
 
 PARALLEL_STAGE = {
-    "hapag": BASE_DIR / "hapag_instant_quote.py",
-    "maersk": BASE_DIR / "maersk_instant_quote.py",
+    "hapag": PROJECT_ROOT / "src" / "scrapers" / "hapag_instant_quote.py",
+    "maersk": PROJECT_ROOT / "src" / "scrapers" / "maersk_instant_quote.py",
 }
 
 SEQUENTIAL_STAGE = {
-    "comparison": BASE_DIR / "quote_comparison.py",
-    "upload": BASE_DIR / "upload_fretes.py",
+    "comparison": PROJECT_ROOT / "src" / "processing" / "quote_comparison.py",
+    "upload": PROJECT_ROOT / "src" / "export" / "upload_fretes.py",
 }
 
 
@@ -34,6 +37,44 @@ def log(msg: str, summary_log: Path) -> None:
     print(line, flush=True)
     with summary_log.open("a", encoding="utf-8") as f:
         f.write(line + "\n")
+
+
+def reset_screens_dir(summary_log: Path) -> None:
+    if SCREENS_DIR.exists():
+        shutil.rmtree(SCREENS_DIR)
+        log(f"[cleanup] pasta removida: {SCREENS_DIR}", summary_log)
+
+    SCREENS_DIR.mkdir(parents=True, exist_ok=True)
+    log(f"[cleanup] pasta pronta: {SCREENS_DIR}", summary_log)
+
+
+def cleanup_old_logs(summary_log: Path, keep_days: int) -> None:
+    if keep_days <= 0:
+        log(f"[cleanup] retencao de logs desativada (LOG_RETENTION_DAYS={keep_days}).", summary_log)
+        return
+
+    cutoff = datetime.now() - timedelta(days=keep_days)
+    removed = 0
+    failed = 0
+
+    for path in LOG_DIR.iterdir():
+        if not path.is_file() or path.suffix.lower() != ".log":
+            continue
+        if path == summary_log:
+            continue
+
+        try:
+            file_time = datetime.fromtimestamp(path.stat().st_mtime)
+            if file_time < cutoff:
+                path.unlink()
+                removed += 1
+        except Exception:
+            failed += 1
+
+    log(
+        f"[cleanup] logs antigos removidos={removed}, falhas={failed}, retencao={keep_days} dias.",
+        summary_log,
+    )
 
 
 def run_blocking(name: str, script_path: Path, log_path: Path, summary_log: Path, dry_run: bool = False) -> int:
@@ -55,7 +96,7 @@ def run_blocking(name: str, script_path: Path, log_path: Path, summary_log: Path
 
         completed = subprocess.run(
             cmd,
-            cwd=str(BASE_DIR),
+            cwd=str(PROJECT_ROOT),
             stdout=lf,
             stderr=subprocess.STDOUT,
             check=False,
@@ -92,7 +133,7 @@ def run_parallel_stage(summary_log: Path, run_id: str, dry_run: bool = False) ->
 
         proc = subprocess.Popen(
             cmd,
-            cwd=str(BASE_DIR),
+            cwd=str(PROJECT_ROOT),
             stdout=lf,
             stderr=subprocess.STDOUT,
             text=True,
@@ -115,12 +156,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Executa pipeline diario de cotacoes.")
     parser.add_argument("--dry-run", action="store_true", help="Mostra a orquestracao sem executar scripts.")
     args = parser.parse_args()
+    log_retention_days = int(os.getenv("LOG_RETENTION_DAYS", "14"))
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     run_id = build_run_id()
     summary_log = LOG_DIR / f"{run_id}_pipeline.log"
 
     log("Pipeline iniciado.", summary_log)
+    reset_screens_dir(summary_log)
+    cleanup_old_logs(summary_log, keep_days=log_retention_days)
 
     parallel_results = run_parallel_stage(summary_log=summary_log, run_id=run_id, dry_run=args.dry_run)
     parallel_failed = {k: v for k, v in parallel_results.items() if v != 0}

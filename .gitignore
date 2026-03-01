@@ -7,6 +7,7 @@ __pycache__/
 .pw-user-data-maersk/
 .pw-user-data-hapag/
 .pw-user-data-cma/
+.pw-user-data-*/
 
 # artifacts (exceto input se quiser)
 artifacts/*

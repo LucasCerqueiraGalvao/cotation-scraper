@@ -6,36 +6,52 @@ import unicodedata
 from pathlib import Path
 
 import pandas as pd
+from dotenv import load_dotenv
 
 # ----------------------------------------------------------------------
 # Caminhos
 # ----------------------------------------------------------------------
-ROOT = Path(r"C:\Users\lucas\Documents\Projects\professional\Cotation Scrapers")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+load_dotenv(PROJECT_ROOT / ".env", override=False)
+
+
+def resolve_env_path(env_name: str, default_path: Path) -> Path:
+    raw = os.getenv(env_name)
+    if not raw:
+        return default_path
+
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        candidate = PROJECT_ROOT / candidate
+    return candidate
 
 # Breakdowns
-HAPAG_BREAKDOWNS  = ROOT / r"artifacts\output\hapag_breakdowns.csv"
-MAERSK_BREAKDOWNS = ROOT / r"artifacts\output\maersk_breakdowns.csv"
+HAPAG_BREAKDOWNS  = PROJECT_ROOT / "artifacts" / "output" / "hapag_breakdowns.csv"
+MAERSK_BREAKDOWNS = PROJECT_ROOT / "artifacts" / "output" / "maersk_breakdowns.csv"
 
 # Jobs
-HAPAG_JOBS  = ROOT / r"artifacts\input\hapag_jobs.xlsx"
-MAERSK_JOBS = ROOT / r"artifacts\input\maersk_jobs.xlsx"
+HAPAG_JOBS  = PROJECT_ROOT / "artifacts" / "input" / "hapag_jobs.xlsx"
+MAERSK_JOBS = PROJECT_ROOT / "artifacts" / "input" / "maersk_jobs.xlsx"
 
 # CMA cotations (fonte final de preco)
-CMA_COTATIONS_FILE = Path(
-    r"C:\Users\lucas\excels\Data Analisys Team - Documentos\Ceramic Customer Freight\cma_cotations.xlsx"
+CMA_COTATIONS_FILE = resolve_env_path(
+    "CMA_COTATIONS_FILE",
+    PROJECT_ROOT / "artifacts" / "input" / "cma_cotations.xlsx",
 )
 CMA_REQUIRED_COLUMNS = {
     "INDEXADOR",
     "ORIGEM",
     "PORTO DE DESTINO",
-    "DATA DE SAIDA",
     "PRECO FINAL (USD)",
 }
-CMA_TRANSIT_COL = "TEMPO DE TRANSPORTE"
-CMA_FREE_TIME_COL = "FREE TIME"
+CMA_TRANSIT_COL_CANDIDATES = (
+    "TRANSIT TIME",
+    "TEMPO DE TRANSPORTE",
+)
+CMA_FREE_TIME_COL_CANDIDATES = ("FREE TIME",)
 
 # Flags por rota
-DESTINATION_CHARGES_FILE = ROOT / r"artifacts\input\destination_charges.xlsx"
+DESTINATION_CHARGES_FILE = PROJECT_ROOT / "artifacts" / "input" / "destination_charges.xlsx"
 DEST_FLAG_COL_IN_FILE = "DESTINATION CHARGES"     # vazio ou 1
 DEST_FLAG_COL_INTERNAL = "use_destination_charges"
 
@@ -43,7 +59,7 @@ USA_FLAG_COL_IN_FILE = "USA"                      # vazio ou 1
 USA_FLAG_COL_INTERNAL = "use_usa_import"
 
 # Saída
-OUTPUT_FILE = ROOT / r"artifacts\output\comparacao_carriers.csv"
+OUTPUT_FILE = PROJECT_ROOT / "artifacts" / "output" / "comparacao_carriers.csv"
 
 
 # ----------------------------------------------------------------------
@@ -336,18 +352,25 @@ def load_cma_prices(file_path: Path) -> pd.DataFrame:
             f"Faltando: {sorted(missing)}"
         )
 
+    cma_price_src = colmap["PRECO FINAL (USD)"]
     rename_map = {
         colmap["INDEXADOR"]: "indexador",
-        colmap["PRECO FINAL (USD)"]: "cma",
+        cma_price_src: "cma",
     }
     select_cols = ["indexador", "cma"]
 
-    cma_transit_src = colmap.get(CMA_TRANSIT_COL)
+    cma_transit_src = next(
+        (colmap[c] for c in CMA_TRANSIT_COL_CANDIDATES if c in colmap),
+        None,
+    )
     if cma_transit_src:
         rename_map[cma_transit_src] = "cma_transit_time"
         select_cols.append("cma_transit_time")
 
-    cma_free_time_src = colmap.get(CMA_FREE_TIME_COL)
+    cma_free_time_src = next(
+        (colmap[c] for c in CMA_FREE_TIME_COL_CANDIDATES if c in colmap),
+        None,
+    )
     if cma_free_time_src:
         rename_map[cma_free_time_src] = "cma_free_time"
         select_cols.append("cma_free_time")
@@ -428,6 +451,37 @@ def winner_free_time(row):
     if carrier == "cma":
         return row.get("cma_free_time")
     return pd.NA
+
+
+def normalize_free_time_value(value):
+    """
+    Normaliza free_time para evitar saida com sufixo '.0' no CSV.
+    Ex.: 14.0 -> 14 (int), mantendo textos descritivos inalterados.
+    """
+    if pd.isna(value):
+        return pd.NA
+
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return pd.NA
+        parsed = pd.to_numeric(text.replace(",", "."), errors="coerce")
+        if pd.notna(parsed):
+            number = float(parsed)
+            if number.is_integer():
+                return int(number)
+            return float(number)
+        return text
+
+    parsed = pd.to_numeric(value, errors="coerce")
+    if pd.isna(parsed):
+        return value
+
+    number = float(parsed)
+    if number.is_integer():
+        return int(number)
+    return float(number)
+
 
 def compute_carrier_total(
     df: pd.DataFrame,
@@ -789,6 +843,7 @@ base["best_price"] = best["best_price"]
 base["best_carrier"] = best["best_carrier"]
 base["transit_time"] = base.apply(winner_transit_time, axis=1)
 base["free_time"] = base.apply(winner_free_time, axis=1)
+base["free_time"] = base["free_time"].map(normalize_free_time_value)
 
 base["key"] = base["ORIGEM"].astype(str) + "-" + base["PORTO DE DESTINO"].astype(str)
 
