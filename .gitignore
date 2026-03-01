@@ -9,7 +9,9 @@ __pycache__/
 .pw-user-data-cma/
 
 # artifacts (exceto input se quiser)
-artifacts/
+artifacts/*
+!artifacts/input/
+!artifacts/input/**
 !.env.example
 
 # IDE
