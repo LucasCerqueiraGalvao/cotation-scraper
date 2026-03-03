@@ -3,6 +3,7 @@
 import os
 import csv
 import time
+import subprocess
 from pathlib import Path
 from datetime import datetime, timedelta
 import re
@@ -10,13 +11,25 @@ import unicodedata
 
 import pandas as pd
 from dotenv import load_dotenv
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+from playwright.sync_api import TimeoutError as PWTimeout
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+# Evita virtualizacao de LocalAppData em Python da Microsoft Store (causa WinError 14001/mozglue).
+if os.name == "nt":
+    os.environ.setdefault(
+        "WIN_PD_OVERRIDE_LOCAL_APPDATA",
+        str(Path.home() / ".camoufox_localappdata"),
+    )
+
+try:
+    from camoufox.sync_api import Camoufox
+except Exception:  # pragma: no cover
+    Camoufox = None
 
 # ----------------------------------------------------------------------
 # CONFIG BÁSICA
 # ----------------------------------------------------------------------
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 LOGIN_URL = (
     "https://identity.hapag-lloyd.com/hlagwebprod.onmicrosoft.com/"
@@ -38,6 +51,10 @@ NEW_QUOTE_URL = "https://www.hapag-lloyd.com/solutions/new-quote/#/simple?langua
 
 JOBS_XLSX = PROJECT_ROOT / "artifacts" / "input" / "hapag_jobs.xlsx"
 OUTPUT_CSV = PROJECT_ROOT / "artifacts" / "output" / "hapag_breakdowns.csv"
+SCREENS_DIR = PROJECT_ROOT / "screens"
+SCREENS_DIR.mkdir(parents=True, exist_ok=True)
+LOGS_DIR = PROJECT_ROOT / "artifacts" / "logs"
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 # colunas de charge que vamos manter fixas no CSV
 KNOWN_CHARGES = [
@@ -59,6 +76,132 @@ BASE_FIELDS = [
 
 ALL_FIELDS = BASE_FIELDS + KNOWN_CHARGES
 
+_WIN_BAD_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1F]+')
+
+
+def _safe_screen_part(s: str, max_len: int = 60) -> str:
+    s = "" if s is None else str(s).strip()
+    s = _WIN_BAD_CHARS_RE.sub("_", s)
+    s = re.sub(r"\s+", "_", s)
+    s = s.strip("._-")
+    if not s:
+        s = "NA"
+    return s[:max_len]
+
+
+def _page_state_snapshot(page) -> dict:
+    state = {
+        "url": "",
+        "title": "",
+        "ready_state": "",
+        "body_text_len": -1,
+        "body_children": -1,
+        "html_len": -1,
+    }
+    try:
+        state["url"] = page.url
+    except Exception:
+        pass
+    try:
+        state["title"] = page.title()
+    except Exception:
+        pass
+    try:
+        state["ready_state"] = page.evaluate("() => document.readyState")
+    except Exception:
+        pass
+    try:
+        state["body_text_len"] = int(
+            page.evaluate(
+                "() => (document.body && document.body.innerText) ? document.body.innerText.length : 0"
+            )
+        )
+    except Exception:
+        pass
+    try:
+        state["body_children"] = int(
+            page.evaluate("() => (document.body && document.body.children) ? document.body.children.length : 0")
+        )
+    except Exception:
+        pass
+    try:
+        state["html_len"] = int(
+            page.evaluate(
+                "() => document.documentElement ? document.documentElement.outerHTML.length : 0"
+            )
+        )
+    except Exception:
+        pass
+    return state
+
+
+def save_page_html_dump(page, origin: str, destination: str, stage: str) -> Path | None:
+    try:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        origin_safe = _safe_screen_part(origin, 40)
+        destination_safe = _safe_screen_part(destination, 40)
+        stage_safe = _safe_screen_part(stage, 30)
+        out = LOGS_DIR / f"hapag__{stage_safe}__{ts}__{origin_safe}__{destination_safe}.html"
+        html = page.content()
+        out.write_text(html, encoding="utf-8", errors="ignore")
+        debug_log(f"[HTML_DUMP] stage={stage_safe} path={out}")
+        return out
+    except Exception as e:
+        debug_log(f"[HTML_DUMP] falha stage={stage} err={e!r}")
+        return None
+
+
+def save_context_screenshots(page, origin: str, destination: str, stage: str) -> None:
+    try:
+        context = page.context
+        pages = list(context.pages)
+    except Exception as e:
+        debug_log(f"[SCREENSHOT_CTX] falha listando pages err={e!r}")
+        return
+
+    for idx, p in enumerate(pages, start=1):
+        try:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            origin_safe = _safe_screen_part(origin, 40)
+            destination_safe = _safe_screen_part(destination, 40)
+            stage_safe = _safe_screen_part(stage, 30)
+            out = SCREENS_DIR / (
+                f"hapag__{stage_safe}__ctx{idx}__{ts}__{origin_safe}__{destination_safe}.png"
+            )
+            p.screenshot(path=str(out), full_page=True)
+            debug_log(f"[SCREENSHOT_CTX] idx={idx} url={p.url} path={out}")
+        except Exception as e:
+            debug_log(f"[SCREENSHOT_CTX] idx={idx} falha err={e!r}")
+
+
+def save_quote_screenshot(page, origin: str, destination: str, stage: str) -> Path | None:
+    """
+    Salva screenshot para facilitar debug/auditoria.
+    Nome inclui stage, timestamp, origem e destino.
+    """
+    try:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        origin_safe = _safe_screen_part(origin, 60)
+        destination_safe = _safe_screen_part(destination, 60)
+        stage_safe = _safe_screen_part(stage, 40)
+        out = SCREENS_DIR / f"hapag__{stage_safe}__{ts}__{origin_safe}__{destination_safe}.png"
+        snap = _page_state_snapshot(page)
+        debug_log(
+            "[PAGE_STATE] "
+            f"stage={stage_safe} url={snap['url']} title={snap['title']!r} "
+            f"ready={snap['ready_state']} body_text_len={snap['body_text_len']} "
+            f"body_children={snap['body_children']} html_len={snap['html_len']}"
+        )
+        page.screenshot(path=str(out), full_page=True)
+        debug_log(f"[SCREENSHOT] stage={stage_safe} path={out}")
+        if stage_safe.endswith("error") or "timeout" in stage_safe or "not_ready" in stage_safe:
+            save_page_html_dump(page, origin, destination, stage_safe)
+            save_context_screenshots(page, origin, destination, stage_safe)
+        return out
+    except Exception as e:
+        debug_log(f"[SCREENSHOT] falha stage={stage} err={e!r}")
+        return None
+
 
 _ROUTE_HEADER_RE = re.compile(r"^=== Processando \((\d+)/(\d+)\)\s+(.+?)\s+->\s+(.+?)\s*===$")
 _LOG_CTX = {
@@ -67,6 +210,8 @@ _LOG_CTX = {
     "last_stage_status": None,
     "last_stage": "ETAPA",
 }
+_CURRENT_ROUTE = {"origin": "NA", "destination": "NA"}
+_DEBUG_LOG_FILE: Path | None = None
 
 
 def _normalize_for_match(text: str) -> str:
@@ -88,7 +233,11 @@ def _counter_label() -> str:
 
 def _infer_stage(msg_text: str, current_stage: str = "ETAPA") -> str:
     msg = _normalize_for_match(msg_text)
-    if "login" in msg or "security check" in msg or "cookies" in msg:
+    if "security check" in msg or "confirme que e humano" in msg:
+        if current_stage and current_stage not in {"ETAPA", "INICIO_ROTA"}:
+            return current_stage
+        return "LOGIN"
+    if "login" in msg or "cookies" in msg:
         return "LOGIN"
     if "csv atualizado" in msg or "processamento concluido" in msg or "job finalizado" in msg:
         return "RESUMO"
@@ -106,7 +255,13 @@ def _infer_stage(msg_text: str, current_stage: str = "ETAPA") -> str:
         return "CONTAINER"
     if "peso" in msg or "weight" in msg:
         return "PESO"
-    if "search" in msg or "offer-card" in msg or "spot offer" in msg:
+    if (
+        "search" in msg
+        or "offer-card" in msg
+        or "spot offer" in msg
+        or "oferta" in msg
+        or "offers" in msg
+    ):
         return "OFERTAS"
     if "price breakdown" in msg:
         return "PRICE_DETAILS"
@@ -130,6 +285,9 @@ def _infer_status(msg_text: str) -> str:
         "spot offer nao encontrado",
         "sem cotacao",
         "job finalizado com erro",
+        "nao ficou pronto",
+        "nao ficaram prontas",
+        "tempo limite",
     ]
     warning_markers = [
         "timeout",
@@ -160,6 +318,7 @@ def _infer_status(msg_text: str) -> str:
         "processando",
         "preenchendo",
         "aguardando",
+        "carregando",
     ]
 
     if any(m in msg for m in error_markers):
@@ -214,11 +373,17 @@ def _to_structured_terminal_line(msg: str) -> str | None:
     return f"{_counter_label()} | {stage} | {status}"
 
 
+def _timestamp_prefix() -> str:
+    return datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
+
+
 def log(msg: str) -> None:
     structured = _to_structured_terminal_line(msg)
     if structured is None:
         return
-    print(structured)
+    line = f"{_timestamp_prefix()} {structured}"
+    print(line)
+    debug_log(f"[TERMINAL] {structured}")
 
 
 def parse_env_bool(name: str, default: bool = False) -> bool:
@@ -231,6 +396,151 @@ def parse_env_bool(name: str, default: bool = False) -> bool:
     if value in {"0", "false", "f", "no", "n", "off"}:
         return False
     return default
+
+
+def resolve_camoufox_executable() -> str:
+    """
+    Resolve caminho do executável do Camoufox.
+    Permite override via HAPAG_CAMOUFOX_EXECUTABLE.
+    """
+    override = (os.getenv("HAPAG_CAMOUFOX_EXECUTABLE") or "").strip()
+    if override:
+        exe_path = Path(override).expanduser().resolve()
+        if not exe_path.exists():
+            raise RuntimeError(
+                f"HAPAG_CAMOUFOX_EXECUTABLE definido, mas arquivo nao existe: {exe_path}"
+            )
+        return str(exe_path)
+
+    try:
+        from camoufox.pkgman import camoufox_path, launch_path
+
+        # Garante instalação local do binário (faz fetch se faltar).
+        camoufox_path()
+        return launch_path()
+    except Exception as e:
+        raise RuntimeError(
+            "Nao foi possivel localizar/instalar o binario Camoufox. "
+            "Rode `camoufox fetch` e tente novamente."
+        ) from e
+
+
+def validate_camoufox_executable(exe_path: str) -> None:
+    """
+    Valida se o executável do Camoufox abre no Windows.
+    Ajuda a identificar erro de runtime (ex.: WinError 14001) com mensagem clara.
+    """
+    if not Path(exe_path).exists():
+        raise RuntimeError(f"Executavel Camoufox nao encontrado: {exe_path}")
+
+    try:
+        subprocess.run(
+            [exe_path, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+    except OSError as e:
+        if getattr(e, "winerror", None) == 14001:
+            raise RuntimeError(
+                "Camoufox encontrado, mas o Windows nao conseguiu iniciar o binario (WinError 14001). "
+                "Isso costuma ser runtime nativo ausente ou cache em LocalAppData virtualizado. "
+                "Confirme Microsoft Visual C++ Redistributable 2015-2022 (x64 e x86) e rode novamente."
+            ) from e
+        raise RuntimeError(
+            "Camoufox encontrado, mas o Windows nao conseguiu iniciar o binario. "
+            "Provavel dependencia nativa ausente (WinError 14001). "
+            "Instale/repare Microsoft Visual C++ Redistributable 2015-2022 (x64 e x86)."
+        ) from e
+    except Exception:
+        # Se a validação falhar por outro motivo transitório, o launch principal ainda tenta.
+        pass
+
+
+def _debug_enabled() -> bool:
+    raw = os.getenv("HAPAG_DEBUG_DETAILED_LOG", "TRUE")
+    value = (raw or "").strip().lower()
+    return value in {"1", "true", "t", "yes", "y", "on"}
+
+
+def _headless_enabled() -> bool:
+    return parse_env_bool("HAPAG_HEADLESS", default=False)
+
+
+def _ensure_debug_log_file() -> Path | None:
+    global _DEBUG_LOG_FILE
+    if not _debug_enabled():
+        return None
+    if _DEBUG_LOG_FILE is None:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        _DEBUG_LOG_FILE = LOGS_DIR / f"{ts}_hapag_headless_debug.log"
+        with _DEBUG_LOG_FILE.open("a", encoding="utf-8") as f:
+            f.write(f"{_timestamp_prefix()} [DEBUG] session_start\n")
+    return _DEBUG_LOG_FILE
+
+
+def debug_log(msg: str) -> None:
+    path = _ensure_debug_log_file()
+    if path is None:
+        return
+    try:
+        with path.open("a", encoding="utf-8") as f:
+            f.write(f"{_timestamp_prefix()} {_counter_label()} {msg}\n")
+    except Exception:
+        pass
+
+
+def _is_security_check_page(page) -> bool:
+    try:
+        url = (page.url or "").lower()
+    except Exception:
+        url = ""
+
+    url_markers = [
+        "security-check",
+        "managed-challenge",
+        "challenge-platform",
+    ]
+    if any(m in url for m in url_markers):
+        return True
+
+    try:
+        title = (page.title() or "").lower()
+    except Exception:
+        title = ""
+    if "security check" in title:
+        return True
+
+    try:
+        body_text = page.evaluate(
+            "() => (document.body && document.body.innerText) ? document.body.innerText.slice(0, 6000) : ''"
+        )
+    except Exception:
+        body_text = ""
+
+    body_norm = _normalize_for_match(body_text)
+    text_markers = [
+        "security check",
+        "managed challenge",
+        "confirm you are human",
+        "confirme que e humano",
+        "browser was tested against security",
+        "triggered the security solution",
+        "cloudflare",
+    ]
+    return any(m in body_norm for m in text_markers)
+
+
+def _security_check_pages(context):
+    pages = []
+    for p in list(context.pages):
+        try:
+            if _is_security_check_page(p):
+                pages.append(p)
+        except Exception:
+            continue
+    return pages
 
 
 # ----------------------------------------------------------------------
@@ -333,7 +643,7 @@ def upsert_charges_in_cache(rows_cache, charges, origin, destination, status, me
     rows_cache[key] = row
 
 
-def flush_rows_cache_to_csv(rows_cache, csv_path: Path):
+def flush_rows_cache_to_csv(rows_cache, csv_path: Path, emit_log: bool = True):
     csv_path.parent.mkdir(parents=True, exist_ok=True)
 
     fieldnames = _all_fieldnames_from_cache(rows_cache)
@@ -346,7 +656,8 @@ def flush_rows_cache_to_csv(rows_cache, csv_path: Path):
             out_row = {field: row.get(field, "") for field in fieldnames}
             writer.writerow(out_row)
 
-    log(f"CSV atualizado em {csv_path} com {len(rows_cache)} linhas (1 por key).")
+    if emit_log:
+        log(f"CSV atualizado em {csv_path} com {len(rows_cache)} linhas (1 por key).")
 
 
 def _parse_iso_or_none(value):
@@ -402,20 +713,64 @@ def build_history_from_rows_cache(rows_cache):
 # Cloudflare: só detecta e espera você resolver na janela
 # ----------------------------------------------------------------------
 def wait_cloudflare_if_needed(page, max_wait_sec=120):
-    """Se aparecer a tela de 'Security Check', espera você resolver."""
+    """
+    Detecta Security Check em QUALQUER aba do contexto e aguarda liberação.
+    Retorna True quando não há challenge ativo; False em timeout.
+    """
     try:
-        page.get_by_text("Security Check", exact=False).wait_for(timeout=5000)
-        log("Cloudflare Security Check detectado.")
-        log(f"Resolve o 'Confirme que é humano' na janela (até {max_wait_sec}s).")
-        page.wait_for_function(
-            "() => !document.body.innerText.includes('Security Check')",
-            timeout=max_wait_sec * 1000,
-        )
-        log("Security Check liberado, seguindo...")
-    except PWTimeout:
-        pass
+        sec_pages = _security_check_pages(page.context)
     except Exception:
-        pass
+        sec_pages = []
+
+    if not sec_pages:
+        return True
+
+    urls = []
+    for sp in sec_pages:
+        try:
+            urls.append(sp.url)
+        except Exception:
+            pass
+
+    log("Cloudflare Security Check detectado.")
+    if _headless_enabled():
+        log(f"Security Check em headless; aguardando liberacao automatica ({max_wait_sec}s).")
+    else:
+        log(f"Resolve o 'Confirme que e humano' na janela (ate {max_wait_sec}s).")
+    debug_log(f"[SECURITY] detectado pages={urls}")
+    save_context_screenshots(
+        page,
+        _CURRENT_ROUTE.get("origin", "NA"),
+        _CURRENT_ROUTE.get("destination", "NA"),
+        "security_check_detected",
+    )
+
+    deadline = time.time() + float(max_wait_sec)
+    while time.time() < deadline:
+        time.sleep(1.0)
+        try:
+            sec_pages = _security_check_pages(page.context)
+        except Exception:
+            sec_pages = []
+        if not sec_pages:
+            log("Security Check liberado, seguindo...")
+            debug_log("[SECURITY] liberado")
+            return True
+
+    urls_timeout = []
+    for sp in sec_pages:
+        try:
+            urls_timeout.append(sp.url)
+        except Exception:
+            pass
+    debug_log(f"[SECURITY] timeout pages={urls_timeout}")
+    save_context_screenshots(
+        page,
+        _CURRENT_ROUTE.get("origin", "NA"),
+        _CURRENT_ROUTE.get("destination", "NA"),
+        "security_check_timeout",
+    )
+    return False
 
 
 # ----------------------------------------------------------------------
@@ -434,7 +789,9 @@ def _find_login_frame(page):
 
 def login_hapag(page):
     page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
-    wait_cloudflare_if_needed(page)
+    security_wait_sec = int(os.getenv("HAPAG_SECURITY_MAX_WAIT_SEC", "180"))
+    if not wait_cloudflare_if_needed(page, max_wait_sec=security_wait_sec):
+        raise RuntimeError("Security Check nao foi liberado durante o login.")
 
     fr = _find_login_frame(page)
 
@@ -473,44 +830,300 @@ def open_quote_page(page):
     if wait_until not in {"load", "domcontentloaded", "networkidle", "commit"}:
         wait_until = "domcontentloaded"
 
+    debug_log(f"[NAV] goto NEW_QUOTE_URL start wait_until={wait_until} timeout_ms={nav_timeout_ms}")
     page.goto(NEW_QUOTE_URL, wait_until=wait_until, timeout=nav_timeout_ms)
+    debug_log(f"[NAV] goto done url={page.url}")
     quote_idle_wait_ms = int(os.getenv("HAPAG_QUOTE_IDLE_WAIT_MS", "2500"))
     if quote_idle_wait_ms > 0:
         try:
             page.wait_for_load_state("networkidle", timeout=quote_idle_wait_ms)
         except Exception:
             log("Quote page: networkidle não atingido rapidamente; seguindo.")
-    wait_cloudflare_if_needed(page)
+            debug_log(f"[NAV] networkidle_not_reached url={page.url}")
+    security_wait_sec = int(os.getenv("HAPAG_SECURITY_MAX_WAIT_SEC", "180"))
+    if not wait_cloudflare_if_needed(page, max_wait_sec=security_wait_sec):
+        raise RuntimeError("Security Check nao foi liberado ao abrir a pagina de cotacao.")
+    if "/solutions/auth/" in page.url:
+        debug_log("[NAV] ainda em auth apos goto; aguardando redirecionamento para new-quote")
+        try:
+            page.wait_for_url("**/solutions/new-quote/**", timeout=15000)
+            debug_log(f"[NAV] redirecionado para new-quote url={page.url}")
+        except Exception as e:
+            debug_log(f"[NAV] timeout aguardando sair de auth err={e!r} url={page.url}")
+        if not wait_cloudflare_if_needed(page, max_wait_sec=security_wait_sec):
+            raise RuntimeError("Security Check nao foi liberado apos redirecionamento auth.")
+    if not wait_quote_form_ready(page):
+        debug_log("[NAV] form_not_ready na primeira tentativa; tentando recovery com reload")
+        try:
+            page.goto(NEW_QUOTE_URL, wait_until="load", timeout=nav_timeout_ms)
+            debug_log(f"[NAV] recovery_goto_done url={page.url}")
+        except Exception as e:
+            debug_log(f"[NAV] recovery_goto_fail err={e!r} url={page.url}")
+        try:
+            page.reload(wait_until="domcontentloaded", timeout=nav_timeout_ms)
+            debug_log(f"[NAV] recovery_reload_done url={page.url}")
+        except Exception as e:
+            debug_log(f"[NAV] recovery_reload_fail err={e!r} url={page.url}")
+
+        if not wait_quote_form_ready(page):
+            save_page_html_dump(
+                page,
+                _CURRENT_ROUTE.get("origin", "NA"),
+                _CURRENT_ROUTE.get("destination", "NA"),
+                "form_not_ready_after_recovery",
+            )
+            save_context_screenshots(
+                page,
+                _CURRENT_ROUTE.get("origin", "NA"),
+                _CURRENT_ROUTE.get("destination", "NA"),
+                "form_not_ready_after_recovery",
+            )
+            raise RuntimeError("Formulario de cotacao nao ficou pronto apos abrir a pagina.")
+    log("Formulario de cotacao pronto.")
+
+
+def wait_quote_form_ready(page) -> bool:
+    timeout_ms = int(os.getenv("HAPAG_FORM_READY_TIMEOUT_MS", "45000"))
+    poll_ms = int(os.getenv("HAPAG_FORM_READY_POLL_MS", "300"))
+    deadline = time.time() + (timeout_ms / 1000.0)
+    started = time.time()
+    debug_log(
+        f"[FORM_READY] start timeout_ms={timeout_ms} poll_ms={poll_ms} url={page.url}"
+    )
+
+    while time.time() < deadline:
+        start_visible = False
+        end_visible = False
+        date_visible = False
+        container_visible = False
+        try:
+            start_input = page.locator('input[data-testid="start-input"]')
+            end_input = page.locator('input[data-testid="end-input"]')
+            date_input = page.locator('input[data-testid="validity-input"]')
+            container_input = page.locator('[data-testid="container-input"]')
+
+            start_visible = start_input.count() > 0 and start_input.first.is_visible()
+            end_visible = end_input.count() > 0 and end_input.first.is_visible()
+            date_visible = date_input.count() > 0 and date_input.first.is_visible()
+            container_visible = container_input.count() > 0 and container_input.first.is_visible()
+
+            if (
+                start_visible
+                and end_visible
+                and date_visible
+                and container_visible
+            ):
+                elapsed = round(time.time() - started, 2)
+                debug_log(f"[FORM_READY] ok elapsed_sec={elapsed}")
+                return True
+        except Exception:
+            pass
+
+        if int((time.time() - started) * 10) % 30 == 0:
+            debug_log(
+                "[FORM_READY] waiting "
+                f"url={page.url} start={start_visible} end={end_visible} "
+                f"date={date_visible} container={container_visible}"
+            )
+        page.wait_for_timeout(poll_ms)
+
+    debug_log(f"[FORM_READY] timeout url={page.url}")
+    save_quote_screenshot(
+        page,
+        _CURRENT_ROUTE.get("origin", "NA"),
+        _CURRENT_ROUTE.get("destination", "NA"),
+        "form_not_ready",
+    )
+    return False
+
+
+def _log_dropdown_snapshot(page, label: str, code: str) -> None:
+    selectors = [
+        ".q-menu:visible .q-item:visible",
+        ".q-menu:visible [role='option']:visible",
+        "[role='listbox'] [role='option']:visible",
+        ".q-dialog:visible .q-item:visible",
+    ]
+    parts = []
+    for sel in selectors:
+        try:
+            count = page.locator(sel).count()
+        except Exception:
+            count = -1
+        parts.append(f"{sel}={count}")
+    debug_log(
+        f"[DROPDOWN] label={label} code={code} snapshot url={page.url} "
+        + " | ".join(parts)
+    )
+    try:
+        items = page.locator(".q-menu:visible .q-item:visible")
+        sample_count = min(items.count(), 5)
+        texts = []
+        for i in range(sample_count):
+            txt = (items.nth(i).inner_text() or "").strip()
+            if txt:
+                texts.append(re.sub(r"\s+", " ", txt))
+        if texts:
+            debug_log(f"[DROPDOWN] label={label} sample_items={texts}")
+    except Exception as e:
+        debug_log(f"[DROPDOWN] label={label} sample_items_error={e!r}")
+
+
+def _find_visible_dropdown_option(page, code: str):
+    code_norm = _normalize_for_match(code)
+    selectors = [
+        ".q-menu:visible .q-item:visible",
+        ".q-menu:visible [role='option']:visible",
+        "[role='listbox'] [role='option']:visible",
+        ".q-dialog:visible .q-item:visible",
+    ]
+
+    for sel in selectors:
+        try:
+            options = page.locator(sel)
+            count = options.count()
+        except Exception:
+            continue
+
+        for idx in range(min(count, 25)):
+            opt = options.nth(idx)
+            try:
+                txt = (opt.inner_text() or "").strip()
+            except Exception:
+                continue
+            if code_norm in _normalize_for_match(txt):
+                return opt, sel, txt
+
+    return None, "", ""
+
+
+def _is_location_value_confirmed(value: str, code: str) -> bool:
+    raw_value = "" if value is None else str(value).strip()
+    raw_code = "" if code is None else str(code).strip()
+    if not raw_value or not raw_code:
+        return False
+
+    value_norm = _normalize_for_match(raw_value)
+    code_norm = _normalize_for_match(raw_code)
+    if not code_norm or code_norm not in value_norm:
+        return False
+
+    # Evita falso positivo quando o campo ficou apenas com o código digitado.
+    if value_norm == code_norm:
+        return False
+
+    # Casos comuns de seleção real no Hapag: "SANTOS (BRSSZ)" etc.
+    if f"({raw_code.upper()})" in raw_value.upper():
+        return True
+
+    # Fallback: contém o código e tem conteúdo adicional além dele.
+    return len(value_norm) >= len(code_norm) + 3
 
 
 def _fill_location_with_dropdown(page, testid: str, code: str, label: str):
     log(f"Preenchendo {label} {code}...")
-    action_timeout_ms = int(os.getenv("HAPAG_ACTION_TIMEOUT_MS", "30000"))
-    dropdown_wait_ms = int(os.getenv("HAPAG_DROPDOWN_WAIT_MS", "8000"))
+    action_timeout_ms = max(int(os.getenv("HAPAG_ACTION_TIMEOUT_MS", "30000")), 30000)
+    dropdown_wait_ms = max(int(os.getenv("HAPAG_DROPDOWN_WAIT_MS", "8000")), 8000)
     poll_ms = int(os.getenv("HAPAG_DROPDOWN_POLL_MS", "250"))
+    type_delay_ms = int(os.getenv("HAPAG_DROPDOWN_TYPE_DELAY_MS", "70"))
+    attempts = max(int(os.getenv("HAPAG_DROPDOWN_ATTEMPTS", "2")), 1)
+    debug_log(
+        f"[DROPDOWN] start label={label} code={code} testid={testid} "
+        f"timeout_ms={dropdown_wait_ms} action_timeout_ms={action_timeout_ms} attempts={attempts}"
+    )
 
-    field = page.locator(f'input[data-testid="{testid}"]')
+    field = page.locator(f'input[data-testid="{testid}"]').first
     field.wait_for(timeout=action_timeout_ms)
-    field.click()
-    field.fill(code)
 
-    # Espera o dropdown aparecer e clica na opção com o código.
-    option = page.get_by_text(code, exact=False).first
-    deadline = time.time() + (dropdown_wait_ms / 1000.0)
-    while time.time() < deadline:
-        try:
-            if option.count() > 0 and option.is_visible():
+    for attempt in range(1, attempts + 1):
+        debug_log(f"[DROPDOWN] attempt={attempt}/{attempts} label={label} code={code}")
+        field.click()
+        field.press("Control+A")
+        field.press("Backspace")
+        page.wait_for_timeout(80)
+        field.type(str(code), delay=type_delay_ms)
+
+        deadline = time.time() + (dropdown_wait_ms / 1000.0)
+        keyboard_fallback_done = False
+        while time.time() < deadline:
+            option, sel, txt = _find_visible_dropdown_option(page, code)
+            if option is not None:
+                try:
+                    option.scroll_into_view_if_needed()
+                except Exception:
+                    pass
                 option.click()
-                log(f"{label.capitalize()} preenchida.")
-                return
-        except Exception:
-            pass
-        page.wait_for_timeout(poll_ms)
+                page.wait_for_timeout(220)
+                try:
+                    field.evaluate("el => el.blur()")
+                except Exception:
+                    pass
+                page.wait_for_timeout(120)
+                final_value = ""
+                try:
+                    final_value = (field.input_value() or "").strip()
+                except Exception:
+                    pass
+                debug_log(
+                    f"[DROPDOWN] selected label={label} selector={sel} option_text={txt!r} "
+                    f"final_value={final_value!r}"
+                )
+                if _is_location_value_confirmed(final_value, code):
+                    log(f"{label.capitalize()} preenchida.")
+                    return
+                debug_log(
+                    f"[DROPDOWN] selection_not_confirmed label={label} "
+                    f"final_value={final_value!r} code={code}"
+                )
 
-    # fallback: mantém comportamento antigo para não quebrar.
-    option.wait_for(timeout=action_timeout_ms)
-    option.click()
-    log(f"{label.capitalize()} preenchida.")
+            if not keyboard_fallback_done and (time.time() + (poll_ms / 1000.0)) >= (deadline - 0.6):
+                keyboard_fallback_done = True
+                try:
+                    field.press("ArrowDown")
+                    field.press("Enter")
+                    page.wait_for_timeout(260)
+                    try:
+                        field.evaluate("el => el.blur()")
+                    except Exception:
+                        pass
+                    page.wait_for_timeout(120)
+                    final_value = (field.input_value() or "").strip()
+                    debug_log(
+                        f"[DROPDOWN] keyboard_fallback label={label} final_value={final_value!r}"
+                    )
+                    if _is_location_value_confirmed(final_value, code):
+                        log(f"{label.capitalize()} preenchida.")
+                        return
+                    debug_log(
+                        f"[DROPDOWN] keyboard_not_confirmed label={label} "
+                        f"final_value={final_value!r} code={code}"
+                    )
+                except Exception as e:
+                    debug_log(f"[DROPDOWN] keyboard_fallback_error label={label} err={e!r}")
+
+            page.wait_for_timeout(poll_ms)
+
+        debug_log(f"[DROPDOWN] attempt_timeout label={label} code={code} attempt={attempt}")
+        if attempt < attempts:
+            try:
+                # Reabre o dropdown de forma limpa antes da próxima tentativa.
+                field.click()
+                field.press("Control+A")
+                field.press("Backspace")
+                page.wait_for_timeout(150)
+            except Exception:
+                pass
+
+    _log_dropdown_snapshot(page, label, code)
+    save_quote_screenshot(
+        page,
+        _CURRENT_ROUTE.get("origin", "NA"),
+        _CURRENT_ROUTE.get("destination", "NA"),
+        f"{label}_dropdown_timeout",
+    )
+    raise RuntimeError(
+        f"Dropdown de {label} nao carregou ou nao selecionou opcao para codigo {code}."
+    )
 
 
 def fill_origin_destination_and_date(page, origin_code: str, dest_code: str):
@@ -538,7 +1151,7 @@ def fill_origin_destination_and_date(page, origin_code: str, dest_code: str):
 
 
 def select_container_and_weight(page, weight_kg: int = 26000):
-    action_timeout_ms = int(os.getenv("HAPAG_ACTION_TIMEOUT_MS", "30000"))
+    action_timeout_ms = max(int(os.getenv("HAPAG_ACTION_TIMEOUT_MS", "30000")), 30000)
 
     # container
     log("Selecionando container \"20' General Purpose\"...")
@@ -561,6 +1174,12 @@ def select_container_and_weight(page, weight_kg: int = 26000):
     weight_input.type(str(weight_kg))
     weight_input.press("Enter")
     log("Peso preenchido.")
+    save_quote_screenshot(
+        page,
+        _CURRENT_ROUTE.get("origin", "NA"),
+        _CURRENT_ROUTE.get("destination", "NA"),
+        "after_weight_ok",
+    )
 
     # Em headless o Enter nem sempre dispara a busca; clicar em Search torna o fluxo consistente.
     try:
@@ -574,24 +1193,119 @@ def select_container_and_weight(page, weight_kg: int = 26000):
     log("Aguardando resultados de ofertas...")
 
 
-def wait_offers_ready(page, timeout_ms: int = 45000) -> bool:
-    """
-    Aguarda os cards de oferta ficarem visiveis apos a busca.
-    Retorna True quando os cards aparecem.
-    """
-    deadline = time.time() + (timeout_ms / 1000.0)
-    while time.time() < deadline:
+def _count_loading_indicators(page) -> int:
+    total = 0
+    selectors = [
+        ".q-inner-loading:visible",
+        ".q-spinner:visible",
+        ".q-skeleton:visible",
+        "[aria-busy='true']:visible",
+    ]
+    for sel in selectors:
         try:
-            if page.locator("div.offer-card:visible").count() > 0:
-                log("Ofertas prontas.")
-                return True
-            if page.locator(".offer-card").count() > 0:
-                log("Ofertas prontas.")
+            total += page.locator(sel).count()
+        except Exception:
+            pass
+    return total
+
+
+def _offers_no_quote_visible(page) -> bool:
+    patterns = [
+        re.compile(r"cannot fulfill your request", re.I),
+        re.compile(r"no offers?", re.I),
+        re.compile(r"no quote", re.I),
+        re.compile(r"unable to provide", re.I),
+    ]
+    for pattern in patterns:
+        try:
+            candidate = page.get_by_text(pattern).first
+            if candidate.count() > 0 and candidate.is_visible():
                 return True
         except Exception:
             pass
-        time.sleep(0.4)
     return False
+
+
+def wait_offers_ready(page, timeout_ms: int = 45000) -> tuple[bool, str]:
+    """
+    Aguarda os cards de oferta ficarem visiveis apos a busca.
+    Se a pagina estiver claramente carregando, estende a espera.
+    Retorna (ok, reason), onde reason pode ser:
+      - ready
+      - no_quote
+      - timeout_loading
+      - timeout_no_offer
+      - security_check
+    """
+    max_wait_ms = int(
+        os.getenv(
+            "HAPAG_OFFERS_MAX_WAIT_MS",
+            str(max(180000, timeout_ms * 3)),
+        )
+    )
+    poll_ms = int(os.getenv("HAPAG_OFFERS_READY_POLL_MS", "400"))
+    soft_deadline = time.time() + (timeout_ms / 1000.0)
+    hard_deadline = time.time() + (max(timeout_ms, max_wait_ms) / 1000.0)
+    saw_loading = False
+    extended_wait_logged = False
+    stable_hits = 0
+    security_wait_sec = int(os.getenv("HAPAG_SECURITY_MAX_WAIT_SEC", "180"))
+
+    while time.time() < hard_deadline:
+        try:
+            sec_pages = _security_check_pages(page.context)
+        except Exception:
+            sec_pages = []
+        if sec_pages:
+            debug_log(
+                f"[OFFERS] security_check_detected pages={len(sec_pages)}; aguardando liberacao"
+            )
+            cleared = wait_cloudflare_if_needed(page, max_wait_sec=security_wait_sec)
+            if not cleared:
+                return False, "security_check"
+            # liberou: volta para o loop e reavalia ofertas
+            continue
+
+        cards_visible = False
+        try:
+            if page.locator("div.offer-card:visible").count() > 0:
+                cards_visible = True
+            elif page.locator(".offer-card").count() > 0:
+                cards_visible = True
+        except Exception:
+            cards_visible = False
+
+        loading_count = _count_loading_indicators(page)
+        if loading_count > 0:
+            saw_loading = True
+
+        if cards_visible:
+            if loading_count == 0:
+                stable_hits += 1
+                if stable_hits >= 2:
+                    log("Ofertas prontas.")
+                    return True, "ready"
+            else:
+                stable_hits = 0
+        else:
+            stable_hits = 0
+            if loading_count == 0 and _offers_no_quote_visible(page):
+                return False, "no_quote"
+
+        now = time.time()
+        if now >= soft_deadline:
+            if saw_loading or loading_count > 0:
+                if not extended_wait_logged:
+                    log("Ofertas ainda carregando; aguardando conclusao...")
+                    extended_wait_logged = True
+            else:
+                return False, "timeout_no_offer"
+
+        page.wait_for_timeout(poll_ms)
+
+    if saw_loading:
+        return False, "timeout_loading"
+    return False, "timeout_no_offer"
 
 
 def wait_price_breakdown_ready(page, timeout_ms: int = 45000, poll_ms: int = 300) -> bool:
@@ -606,6 +1320,19 @@ def wait_price_breakdown_ready(page, timeout_ms: int = 45000, poll_ms: int = 300
     stable_hits = 0
 
     while time.time() < deadline:
+        try:
+            sec_pages = _security_check_pages(page.context)
+        except Exception:
+            sec_pages = []
+        if sec_pages:
+            debug_log("[PRICE_DETAILS] security_check_detected; aguardando liberacao")
+            if not wait_cloudflare_if_needed(
+                page,
+                max_wait_sec=int(os.getenv("HAPAG_SECURITY_MAX_WAIT_SEC", "180")),
+            ):
+                debug_log("[PRICE_DETAILS] security_check_timeout")
+                return False
+
         panel_visible = False
         table_count = 0
         row_count = 0
@@ -973,33 +1700,75 @@ def run_single_quote_flow(page, origin: str, destination: str):
     status = "success"
     message = ""
     charges = {}
+    _CURRENT_ROUTE["origin"] = origin
+    _CURRENT_ROUTE["destination"] = destination
+    debug_log(f"[FLOW] start origin={origin} destination={destination} url={page.url}")
 
     try:
+        debug_log("[FLOW] step=open_quote_page start")
         open_quote_page(page)
+        debug_log("[FLOW] step=open_quote_page ok")
+        debug_log("[FLOW] step=fill_origin_destination_and_date start")
         fill_origin_destination_and_date(page, origin, destination)
+        debug_log("[FLOW] step=fill_origin_destination_and_date ok")
+        debug_log("[FLOW] step=select_container_and_weight start")
         select_container_and_weight(page, weight_kg=26000)
+        debug_log("[FLOW] step=select_container_and_weight ok")
         offers_timeout_ms = int(os.getenv("HAPAG_OFFERS_READY_TIMEOUT_MS", "45000"))
-        if not wait_offers_ready(page, timeout_ms=offers_timeout_ms):
-            status = "no_quote"
-            message = "Spot offer nao encontrado ou rota sem cotacao."
+        debug_log(f"[FLOW] step=wait_offers_ready start timeout_ms={offers_timeout_ms}")
+        offers_ready, offers_reason = wait_offers_ready(page, timeout_ms=offers_timeout_ms)
+        if not offers_ready:
+            debug_log(f"[FLOW] step=wait_offers_ready not_ready reason={offers_reason}")
+            if offers_reason == "no_quote":
+                status = "no_quote"
+                message = "Spot offer nao encontrado ou rota sem cotacao."
+                log("Rota sem cotacao para as ofertas pesquisadas.")
+                save_quote_screenshot(page, origin, destination, "no_quote")
+            elif offers_reason == "security_check":
+                status = "error"
+                message = "Security Check ativo bloqueou carregamento das ofertas."
+                log("Falha: Security Check bloqueou o carregamento das ofertas.")
+                save_quote_screenshot(page, origin, destination, "security_check_block")
+                save_context_screenshots(page, origin, destination, "security_check_block")
+            elif offers_reason == "timeout_loading":
+                status = "error"
+                message = "Carregamento das ofertas excedeu o tempo limite."
+                log("Falha: carregamento de ofertas excedeu o tempo limite.")
+                save_quote_screenshot(page, origin, destination, "offers_timeout_loading")
+            else:
+                status = "error"
+                message = "Ofertas nao ficaram disponiveis apos a busca."
+                log("Falha: ofertas nao ficaram disponiveis apos a busca.")
+                save_quote_screenshot(page, origin, destination, "offers_timeout_no_offer")
             return {}, status, message
 
         # tenta achar o Spot; se nao tiver, considera no_quote e sai
         try:
+            debug_log("[FLOW] step=select_spot_offer start")
             select_spot_offer(page)
+            debug_log("[FLOW] step=select_spot_offer ok")
         except Exception as e:
             status = "no_quote"
             message = "Spot offer nao encontrado ou rota sem cotacao."
             log("Falha ao abrir Spot offer.")
+            debug_log(f"[FLOW] step=select_spot_offer fail err={e!r}")
+            save_quote_screenshot(page, origin, destination, "spot_offer_not_found")
             return {}, status, message
 
         # se conseguiu selecionar o Spot, extrai charges
+        debug_log("[FLOW] step=extract_charge_items start")
         charges = extract_charge_items(page)
+        debug_log(f"[FLOW] step=extract_charge_items ok fields={len(charges)}")
+        save_quote_screenshot(page, origin, destination, "quote_success")
 
     except Exception as e:
         status = "error"
         message = f"Erro inesperado durante cotação: {e!r}"
+        log(message)
+        debug_log(f"[FLOW] exception err={e!r} url={page.url}")
+        save_quote_screenshot(page, origin, destination, "flow_error")
 
+    debug_log(f"[FLOW] end status={status} message={message!r}")
     return charges, status, message
 
 
@@ -1084,9 +1853,18 @@ def main():
             for j in jobs
         )
     )
+    debug_first_job_only = parse_env_bool("HAPAG_DEBUG_FIRST_JOB_ONLY", default=False)
+    if debug_first_job_only and jobs:
+        first = jobs[0]
+        jobs = [first]
+        log("Modo debug ativo: executando somente o primeiro job da fila priorizada.")
+        debug_log(
+            "[DEBUG_MODE] first_job_only=True "
+            f"key={first['key']} group={first['priority_group']} ts={first['priority_ts']}"
+        )
 
-    hapag_headless = False
-    action_timeout_ms = int(os.getenv("HAPAG_ACTION_TIMEOUT_MS", "30000"))
+    hapag_headless = parse_env_bool("HAPAG_HEADLESS", default=False)
+    action_timeout_ms = max(int(os.getenv("HAPAG_ACTION_TIMEOUT_MS", "30000")), 30000)
     login_timeout_ms = int(os.getenv("HAPAG_LOGIN_TIMEOUT_MS", "60000"))
     nav_timeout_ms = int(os.getenv("HAPAG_NAV_TIMEOUT_MS", "60000"))
     viewport_width = int(os.getenv("HAPAG_VIEWPORT_WIDTH", "1366"))
@@ -1097,44 +1875,59 @@ def main():
     after_login_sleep_sec = float(os.getenv("HAPAG_AFTER_LOGIN_SLEEP_SEC", "2"))
     keep_open_secs = float(os.getenv("HAPAG_KEEP_OPEN_SECS", "3"))
     user_data_dir = os.getenv("HAPAG_USER_DATA_DIR", str(PROJECT_ROOT / ".pw-user-data-hapag"))
-    use_stealth = parse_env_bool("HAPAG_STEALTH", default=True)
-    ignore_enable_automation = parse_env_bool("HAPAG_IGNORE_ENABLE_AUTOMATION", default=True)
+    camoufox_humanize = parse_env_bool("HAPAG_CAMOUFOX_HUMANIZE", default=True)
+    camoufox_ignore_https_errors = parse_env_bool("HAPAG_CAMOUFOX_IGNORE_HTTPS_ERRORS", default=True)
+    camoufox_executable = resolve_camoufox_executable()
+    validate_camoufox_executable(camoufox_executable)
 
     log(
-        f"[cfg] headless={hapag_headless} action_timeout_ms={action_timeout_ms} "
+        f"[cfg] engine=camoufox headless={hapag_headless} action_timeout_ms={action_timeout_ms} "
         f"login_timeout_ms={login_timeout_ms} nav_timeout_ms={nav_timeout_ms} "
         f"viewport={viewport_width}x{viewport_height}"
     )
+    debug_log(
+        "[CFG] "
+        f"engine=camoufox headless={hapag_headless} action_timeout_ms={action_timeout_ms} "
+        f"login_timeout_ms={login_timeout_ms} nav_timeout_ms={nav_timeout_ms} "
+        f"dropdown_wait_ms={max(int(os.getenv('HAPAG_DROPDOWN_WAIT_MS', '8000')), 8000)} "
+        f"offers_timeout_ms={int(os.getenv('HAPAG_OFFERS_READY_TIMEOUT_MS', '45000'))} "
+        f"user_data_dir={user_data_dir} humanize={camoufox_humanize} "
+        f"ignore_https_errors={camoufox_ignore_https_errors} "
+        f"camoufox_executable={camoufox_executable} "
+        f"win_pd_override_local_appdata={os.getenv('WIN_PD_OVERRIDE_LOCAL_APPDATA', '')}"
+    )
 
-    with sync_playwright() as p:
-        context_kwargs = {
-            "user_data_dir": user_data_dir,
-            "channel": "chrome",
-            "headless": hapag_headless,
-            "viewport": {"width": viewport_width, "height": viewport_height},
-            "locale": locale,
-            "timezone_id": timezone,
-            "extra_http_headers": {"Accept-Language": accept_language},
-            "args": [
-                "--disable-blink-features=AutomationControlled",
-                "--disable-infobars",
-                "--disable-dev-shm-usage",
-                "--no-first-run",
-                "--no-default-browser-check",
-                f"--window-size={viewport_width},{viewport_height}",
-            ],
-        }
-        if ignore_enable_automation:
-            context_kwargs["ignore_default_args"] = ["--enable-automation"]
+    if Camoufox is None:
+        raise RuntimeError(
+            "Camoufox nao esta instalado. Rode: pip install -U camoufox && camoufox fetch"
+        )
 
-        context = p.chromium.launch_persistent_context(**context_kwargs)
-        if use_stealth:
-            context.add_init_script(
-                "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
-            )
+    camoufox_kwargs = {
+        "headless": hapag_headless,
+        "persistent_context": True,
+        "user_data_dir": user_data_dir,
+        "humanize": camoufox_humanize,
+        "locale": locale,
+        "ignore_https_errors": camoufox_ignore_https_errors,
+        "executable_path": camoufox_executable,
+        "args": [
+            "--disable-dev-shm-usage",
+            "--no-first-run",
+        ],
+    }
+
+    with Camoufox(**camoufox_kwargs) as context:
+        try:
+            context.set_extra_http_headers({"Accept-Language": accept_language})
+        except Exception:
+            pass
 
         # LOGIN (apenas 1 vez)
         login_page = context.new_page()
+        try:
+            login_page.set_viewport_size({"width": viewport_width, "height": viewport_height})
+        except Exception:
+            pass
         login_page.set_default_timeout(action_timeout_ms)
         login_page.set_default_navigation_timeout(login_timeout_ms)
         login_hapag(login_page)
@@ -1143,6 +1936,10 @@ def main():
 
         # Página reutilizada para todas as cotações
         quote_page = context.new_page()
+        try:
+            quote_page.set_viewport_size({"width": viewport_width, "height": viewport_height})
+        except Exception:
+            pass
         quote_page.set_default_timeout(action_timeout_ms)
         quote_page.set_default_navigation_timeout(nav_timeout_ms)
 
@@ -1153,6 +1950,7 @@ def main():
             key = j["key"]
 
             log(f"=== Processando ({idx}/{total_jobs}) {origin} -> {destination} ===")
+            debug_log(f"[JOB] start idx={idx}/{total_jobs} key={key} origin={origin} destination={destination}")
 
             try:
                 charges, status, message = run_single_quote_flow(
@@ -1162,6 +1960,8 @@ def main():
                 charges = {}
                 status = "error"
                 message = f"Erro não tratado no fluxo: {e!r}"
+                save_quote_screenshot(quote_page, origin, destination, "job_exception")
+                debug_log(f"[JOB] exception idx={idx}/{total_jobs} err={e!r}")
 
             if status == "success":
                 log("Job finalizado com sucesso.")
@@ -1178,6 +1978,11 @@ def main():
                 status=status,
                 message=message,
                 key=key,
+            )
+            flush_rows_cache_to_csv(rows_cache, OUTPUT_CSV, emit_log=False)
+            debug_log(
+                f"[JOB] end idx={idx}/{total_jobs} status={status} "
+                f"message={message!r} charges_count={len(charges)}"
             )
 
         # grava o CSV final com 1 linha por key
@@ -1423,9 +2228,13 @@ def convert_currency_columns_in_csv_to_usd(
     try:
         log(f"Conversão para USD concluída. Células convertidas: {n}. Arquivo: {out_path}")
     except Exception:
-        print(f"[FX] Conversão para USD concluída. Células convertidas: {n}. Arquivo: {out_path}")
+        print(
+            f"{_timestamp_prefix()} [FX] Conversão para USD concluída. "
+            f"Células convertidas: {n}. Arquivo: {out_path}"
+        )
 
 
 if __name__ == "__main__":
     main()
+
 

@@ -365,11 +365,15 @@ def _to_structured_terminal_line(msg: str) -> str | None:
     return f"{_counter_label()} | {stage} | {status}"
 
 
+def _timestamp_prefix() -> str:
+    return datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
+
+
 def log(msg: str) -> None:
     structured = _to_structured_terminal_line(msg)
     if structured is None:
         return
-    console_line = _to_console_text(structured)
+    console_line = _to_console_text(f"{_timestamp_prefix()} {structured}")
     try:
         print(console_line)
     except UnicodeEncodeError:
