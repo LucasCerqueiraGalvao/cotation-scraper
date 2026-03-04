@@ -1,8 +1,12 @@
 import os
+import json
 from pathlib import Path
 import shutil
 import subprocess
 import time
+from urllib.error import HTTPError
+from urllib.parse import quote, urlencode
+from urllib.request import Request, urlopen
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -48,6 +52,20 @@ UPLOAD_SYNC_WAIT_SEC = int(os.getenv("UPLOAD_SYNC_WAIT_SEC", "30"))
 UPLOAD_ENSURE_ONEDRIVE = os.getenv("UPLOAD_ENSURE_ONEDRIVE", "TRUE").strip().lower() in {
     "1", "true", "t", "yes", "y", "on"
 }
+UPLOAD_MODE = os.getenv("UPLOAD_MODE", "SYNC").strip().upper()
+GRAPH_TIMEOUT_SEC = int(os.getenv("SHAREPOINT_GRAPH_TIMEOUT_SEC", "30"))
+
+
+def _validate_upload_mode() -> str:
+    valid = {"SYNC", "SHAREPOINT", "BOTH"}
+    if UPLOAD_MODE in valid:
+        return UPLOAD_MODE
+
+    print(f"[upload] aviso: UPLOAD_MODE invalido '{UPLOAD_MODE}'. Usando SYNC.")
+    return "SYNC"
+
+
+UPLOAD_MODE = _validate_upload_mode()
 
 
 def _is_any_process_running(process_names):
@@ -178,11 +196,12 @@ def check_config():
     print("DEBUG CSV_INPUT:", CSV_INPUT)
     print("DEBUG XLSX_OUTPUT:", XLSX_OUTPUT)
     print("DEBUG SYNC_FOLDER:", SYNC_FOLDER)
+    print("DEBUG UPLOAD_MODE:", UPLOAD_MODE)
 
     if not CSV_INPUT.exists():
         raise FileNotFoundError(f"CSV de entrada nao encontrado: {CSV_INPUT}")
 
-    if not SYNC_FOLDER.exists():
+    if UPLOAD_MODE in {"SYNC", "BOTH"} and not SYNC_FOLDER.exists():
         SYNC_FOLDER.mkdir(parents=True, exist_ok=True)
         print(f"AVISO: pasta de sincronizacao nao existia e foi criada: {SYNC_FOLDER}")
 
@@ -294,6 +313,142 @@ def gerar_planilha_cliente():
 # 3) COPIA PARA A PASTA SINCRONIZADA
 # =========================================
 
+def _http_json_request(
+    method: str,
+    url: str,
+    *,
+    headers: dict | None = None,
+    body: bytes | None = None,
+    timeout: int = GRAPH_TIMEOUT_SEC,
+) -> dict:
+    req = Request(url=url, data=body, method=method, headers=headers or {})
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", errors="ignore")
+            return json.loads(raw) if raw else {}
+    except HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", errors="ignore")
+        except Exception:
+            detail = ""
+        raise RuntimeError(f"HTTP {e.code} em {url}: {detail}") from e
+
+
+def _graph_get_token() -> str:
+    tenant_id = (os.getenv("SHAREPOINT_TENANT_ID") or "").strip()
+    client_id = (os.getenv("SHAREPOINT_CLIENT_ID") or "").strip()
+    client_secret = (os.getenv("SHAREPOINT_CLIENT_SECRET") or "").strip()
+
+    if not tenant_id or not client_id or not client_secret:
+        raise RuntimeError(
+            "Credenciais SharePoint ausentes. Defina SHAREPOINT_TENANT_ID, "
+            "SHAREPOINT_CLIENT_ID e SHAREPOINT_CLIENT_SECRET."
+        )
+
+    token_url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+    payload = urlencode(
+        {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "grant_type": "client_credentials",
+            "scope": "https://graph.microsoft.com/.default",
+        }
+    ).encode("utf-8")
+
+    data = _http_json_request(
+        "POST",
+        token_url,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        body=payload,
+    )
+    token = (data.get("access_token") or "").strip()
+    if not token:
+        raise RuntimeError(f"Falha ao obter token Graph. Resposta: {data}")
+    return token
+
+
+def _encode_graph_path(path_value: str) -> str:
+    parts = [p for p in path_value.replace("\\", "/").split("/") if p]
+    return "/".join(quote(p, safe="") for p in parts)
+
+
+def _graph_resolve_site_id(access_token: str) -> str:
+    site_id = (os.getenv("SHAREPOINT_SITE_ID") or "").strip()
+    if site_id:
+        return site_id
+
+    hostname = (os.getenv("SHAREPOINT_HOSTNAME") or "").strip()
+    site_path = (os.getenv("SHAREPOINT_SITE_PATH") or "").strip().strip("/")
+    if site_path.lower().startswith("sites/"):
+        site_path = site_path[6:]
+
+    if not hostname or not site_path:
+        raise RuntimeError(
+            "Defina SHAREPOINT_SITE_ID ou (SHAREPOINT_HOSTNAME + SHAREPOINT_SITE_PATH)."
+        )
+
+    url = f"https://graph.microsoft.com/v1.0/sites/{hostname}:/sites/{_encode_graph_path(site_path)}"
+    data = _http_json_request(
+        "GET",
+        url,
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    resolved = (data.get("id") or "").strip()
+    if not resolved:
+        raise RuntimeError(f"Nao foi possivel resolver site id. Resposta: {data}")
+    return resolved
+
+
+def _graph_resolve_drive_id(access_token: str, site_id: str) -> str:
+    drive_id = (os.getenv("SHAREPOINT_DRIVE_ID") or "").strip()
+    if drive_id:
+        return drive_id
+
+    url = f"https://graph.microsoft.com/v1.0/sites/{quote(site_id, safe='')}/drive"
+    data = _http_json_request(
+        "GET",
+        url,
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    resolved = (data.get("id") or "").strip()
+    if not resolved:
+        raise RuntimeError(f"Nao foi possivel resolver drive id. Resposta: {data}")
+    return resolved
+
+
+def upload_para_sharepoint_direto() -> None:
+    if not XLSX_OUTPUT.exists():
+        raise FileNotFoundError(f"Arquivo XLSX nao encontrado: {XLSX_OUTPUT}")
+
+    access_token = _graph_get_token()
+    site_id = _graph_resolve_site_id(access_token)
+    drive_id = _graph_resolve_drive_id(access_token, site_id)
+
+    folder_path = (os.getenv("SHAREPOINT_FOLDER_PATH") or "").strip().strip("/\\")
+    remote_path = f"{folder_path}/{XLSX_OUTPUT.name}" if folder_path else XLSX_OUTPUT.name
+    encoded_remote_path = _encode_graph_path(remote_path)
+
+    upload_url = (
+        f"https://graph.microsoft.com/v1.0/drives/{quote(drive_id, safe='')}"
+        f"/root:/{encoded_remote_path}:/content"
+    )
+    payload = XLSX_OUTPUT.read_bytes()
+
+    result = _http_json_request(
+        "PUT",
+        upload_url,
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        },
+        body=payload,
+    )
+
+    remote_web_url = result.get("webUrl") or "(sem webUrl na resposta)"
+    print(f"[sharepoint] upload concluido com sucesso: {remote_web_url}")
+
+
 def copiar_para_pasta_sincronizada():
     if not XLSX_OUTPUT.exists():
         raise FileNotFoundError(f"Arquivo XLSX nao encontrado: {XLSX_OUTPUT}")
@@ -319,7 +474,7 @@ def copiar_para_pasta_sincronizada():
             print(f"[sync] aviso: nao confirmei estabilidade do arquivo no tempo limite: {destino}")
 
     print("Copia concluida com sucesso.")
-    print("OneDrive/SharePoint foi acionado para sincronizar esse arquivo.")
+    print("Cliente de sincronizacao local (OneDrive) foi acionado para sincronizar esse arquivo.")
 
 
 # =========================================
@@ -329,4 +484,7 @@ def copiar_para_pasta_sincronizada():
 if __name__ == "__main__":
     check_config()
     gerar_planilha_cliente()
-    copiar_para_pasta_sincronizada()
+    if UPLOAD_MODE in {"SYNC", "BOTH"}:
+        copiar_para_pasta_sincronizada()
+    if UPLOAD_MODE in {"SHAREPOINT", "BOTH"}:
+        upload_para_sharepoint_direto()

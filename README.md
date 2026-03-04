@@ -56,6 +56,23 @@ Opcional para caminhos (aceita relativo ao root do projeto):
 - `CMA_COTATIONS_FILE` (default: `artifacts/input/cma_cotations.xlsx`)
 - `SYNC_FOLDER` (default: `artifacts/sync_out`)
 
+Publicacao (upload do XLSX final):
+
+- `UPLOAD_MODE` (default `SYNC`; opcoes `SYNC`, `SHAREPOINT`, `BOTH`)
+- `UPLOAD_ENSURE_ONEDRIVE` (default `TRUE`; usado quando `UPLOAD_MODE` inclui `SYNC`)
+- `UPLOAD_SYNC_WAIT_SEC` (default `30`; usado quando `UPLOAD_MODE` inclui `SYNC`)
+- `ONEDRIVE_START_TIMEOUT_SEC` (default `30`; usado quando `UPLOAD_MODE` inclui `SYNC`)
+- `SHAREPOINT_GRAPH_TIMEOUT_SEC` (default `30`)
+
+Para upload direto no SharePoint (quando `UPLOAD_MODE=SHAREPOINT` ou `BOTH`):
+
+- `SHAREPOINT_TENANT_ID`
+- `SHAREPOINT_CLIENT_ID`
+- `SHAREPOINT_CLIENT_SECRET`
+- `SHAREPOINT_SITE_ID` **ou** (`SHAREPOINT_HOSTNAME` + `SHAREPOINT_SITE_PATH`)
+- `SHAREPOINT_DRIVE_ID` (opcional; se vazio, usa o drive padrao do site)
+- `SHAREPOINT_FOLDER_PATH` (pasta destino dentro do drive, ex.: `Ceramic Customer Freight`)
+
 Opcionais Maersk:
 
 - `MAERSK_HEADLESS` (default `FALSE`; aceita `TRUE/FALSE`, `1/0`, `yes/no`)
@@ -171,6 +188,13 @@ Via wrapper `.cmd`:
 
 ```powershell
 .\scripts\run_daily_pipeline.cmd
+```
+
+Exemplo para publicar direto no SharePoint (sem depender do cliente OneDrive sincronizar):
+
+```powershell
+$env:UPLOAD_MODE="SHAREPOINT"
+.\.venv\Scripts\python.exe src\export\upload_fretes.py
 ```
 
 ## Agendamento (Windows)
