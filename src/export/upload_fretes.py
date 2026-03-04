@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 import shutil
+import subprocess
+import time
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -41,6 +43,102 @@ OBSERVACAO_CLIENTE = (
     "Taxa de amend/cancelamento de USD 350,00/container."
 )
 TABLE_LAST_ROW_MIN = 223
+ONEDRIVE_START_TIMEOUT_SEC = int(os.getenv("ONEDRIVE_START_TIMEOUT_SEC", "30"))
+UPLOAD_SYNC_WAIT_SEC = int(os.getenv("UPLOAD_SYNC_WAIT_SEC", "30"))
+UPLOAD_ENSURE_ONEDRIVE = os.getenv("UPLOAD_ENSURE_ONEDRIVE", "TRUE").strip().lower() in {
+    "1", "true", "t", "yes", "y", "on"
+}
+
+
+def _is_any_process_running(process_names):
+    for process_name in process_names:
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", f"IMAGENAME eq {process_name}"],
+                capture_output=True,
+                text=True,
+                encoding="cp1252",
+                errors="ignore",
+                check=False,
+            )
+            if process_name.lower() in (result.stdout or "").lower():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _find_onedrive_exe() -> Path | None:
+    candidates = [
+        Path(os.environ.get("ProgramFiles", "")) / "Microsoft OneDrive" / "OneDrive.exe",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "OneDrive" / "OneDrive.exe",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
+
+
+def ensure_onedrive_running(timeout_sec: int = ONEDRIVE_START_TIMEOUT_SEC) -> bool:
+    watch = ["OneDrive.exe", "OneDrive.Sync.Service.exe"]
+
+    if _is_any_process_running(watch):
+        print("[sync] OneDrive ja esta em execucao.")
+        return True
+
+    onedrive_exe = _find_onedrive_exe()
+    if onedrive_exe is None:
+        print("[sync] aviso: OneDrive.exe nao encontrado neste computador.")
+        return False
+
+    try:
+        subprocess.Popen(
+            [str(onedrive_exe)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as e:
+        print(f"[sync] aviso: falha ao iniciar OneDrive: {e}")
+        return False
+
+    deadline = time.time() + max(1, timeout_sec)
+    while time.time() < deadline:
+        if _is_any_process_running(watch):
+            print("[sync] OneDrive iniciado com sucesso.")
+            return True
+        time.sleep(1.0)
+
+    print("[sync] aviso: OneDrive nao confirmou inicializacao a tempo.")
+    return False
+
+
+def wait_file_stable(file_path: Path, timeout_sec: int = UPLOAD_SYNC_WAIT_SEC, poll_sec: float = 2.0) -> bool:
+    deadline = time.time() + max(1, timeout_sec)
+    prev_sig = None
+    stable_hits = 0
+
+    while time.time() < deadline:
+        if file_path.exists():
+            try:
+                st = file_path.stat()
+                sig = (st.st_size, st.st_mtime_ns)
+
+                with file_path.open("rb") as f:
+                    _ = f.read(1)
+
+                if sig == prev_sig:
+                    stable_hits += 1
+                    if stable_hits >= 2:
+                        return True
+                else:
+                    stable_hits = 0
+                    prev_sig = sig
+            except Exception:
+                stable_hits = 0
+
+        time.sleep(poll_sec)
+
+    return file_path.exists()
 
 
 def formatar_transit_time(value):
@@ -202,13 +300,26 @@ def copiar_para_pasta_sincronizada():
 
     SYNC_FOLDER.mkdir(parents=True, exist_ok=True)
 
+    if UPLOAD_ENSURE_ONEDRIVE:
+        ensure_onedrive_running()
+
     destino = SYNC_FOLDER / XLSX_OUTPUT.name
     print(f"Copiando arquivo para pasta sincronizada: {destino}")
 
     shutil.copy2(XLSX_OUTPUT, destino)
+    try:
+        os.utime(destino, None)
+    except Exception:
+        pass
+
+    if UPLOAD_SYNC_WAIT_SEC > 0:
+        if wait_file_stable(destino):
+            print(f"[sync] arquivo estabilizado para sincronizacao: {destino}")
+        else:
+            print(f"[sync] aviso: nao confirmei estabilidade do arquivo no tempo limite: {destino}")
 
     print("Copia concluida com sucesso.")
-    print("Agora o OneDrive/SharePoint sincroniza esse arquivo automaticamente.")
+    print("OneDrive/SharePoint foi acionado para sincronizar esse arquivo.")
 
 
 # =========================================

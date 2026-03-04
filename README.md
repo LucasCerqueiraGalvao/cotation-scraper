@@ -6,7 +6,7 @@ Pipeline para coletar cotacoes de frete, comparar carriers e gerar planilha fina
 
 1. `scripts/run_daily_pipeline.cmd` chama `src/orchestration/daily_pipeline_runner.py`.
 2. O runner:
-   - limpa a pasta `screens`;
+   - limpa a pasta `artifacts/runtime/screens`;
    - remove logs antigos em `artifacts/logs` (retencao configuravel);
    - roda em paralelo:
      - `src/scrapers/hapag_instant_quote.py`
@@ -25,7 +25,7 @@ Pipeline para coletar cotacoes de frete, comparar carriers e gerar planilha fina
 - `artifacts/input`: planilhas de entrada.
 - `artifacts/output`: CSV/XLSX gerados.
 - `artifacts/logs`: logs de execucao.
-- `screens`: screenshots de debug (limpa no inicio de cada execucao).
+- `artifacts/runtime`: cache/perfis locais dos browsers + screenshots temporarios.
 
 ## Requisitos
 
@@ -110,7 +110,7 @@ Opcionais Hapag:
 - `HAPAG_IGNORE_ENABLE_AUTOMATION` (default `TRUE`)
 - `HAPAG_AFTER_LOGIN_SLEEP_SEC` (default `2`)
 - `HAPAG_KEEP_OPEN_SECS` (default `3`)
-- `HAPAG_USER_DATA_DIR` (default `.pw-user-data-hapag`)
+- `HAPAG_USER_DATA_DIR` (default `%LOCALAPPDATA%\\CotationScrapersRuntime\\hapag\\playwright_profiles\\hapag`)
 - `HAPAG_TEST_ORIGIN` (default `BRSSZ`; usado no script de teste)
 - `HAPAG_TEST_DESTINATION` (default `PTLIS`; usado no script de teste)
 
@@ -178,5 +178,5 @@ Via wrapper `.cmd`:
 Cria/atualiza tarefa no Task Scheduler:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\install_weekday_task.ps1 -StartTime "04:20"
+powershell -ExecutionPolicy Bypass -File .\scripts\install_weekday_task.ps1 -StartTime "04:00"
 ```

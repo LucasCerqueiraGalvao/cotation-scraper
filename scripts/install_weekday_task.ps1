@@ -1,6 +1,6 @@
-﻿param(
+param(
     [string]$TaskName = "CotationScrapers_Daily_2AM",
-    [string]$StartTime = "04:20"
+    [string]$StartTime = "04:00"
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,6 +31,21 @@ schtasks /Create /TN $TaskName /TR $taskCmd /SC WEEKLY /D MON,TUE,WED,THU,FRI /S
 
 if ($LASTEXITCODE -ne 0) {
     throw "Falha ao criar/atualizar tarefa no Agendador."
+}
+
+try {
+    $settings = New-ScheduledTaskSettingsSet `
+        -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries `
+        -StartWhenAvailable `
+        -WakeToRun `
+        -MultipleInstances IgnoreNew `
+        -ExecutionTimeLimit (New-TimeSpan -Hours 12)
+
+    Set-ScheduledTask -TaskName $TaskName -Settings $settings | Out-Null
+    Write-Host "Configuracoes adicionais aplicadas (bateria/start-when-available/wake-to-run)."
+} catch {
+    Write-Warning "Nao foi possivel aplicar configuracoes adicionais via ScheduledTasks module: $($_.Exception.Message)"
 }
 
 Write-Host "Tarefa criada/atualizada com sucesso."

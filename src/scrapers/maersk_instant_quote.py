@@ -16,6 +16,8 @@ from functools import lru_cache
 # Configs e caminhos
 # ----------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+RUNTIME_DIR = PROJECT_ROOT / "artifacts" / "runtime"
+BROWSER_PROFILES_DIR = RUNTIME_DIR / "playwright_profiles"
 
 HUB_URL   = "https://www.maersk.com/hub/"
 BOOK_URL  = "https://www.maersk.com/book/"
@@ -39,12 +41,11 @@ INPUT_XLSX       = ARTIFACTS / "input" / "maersk_jobs.xlsx"
 OUT_DIR          = ARTIFACTS / "output"
 OUT_CSV          = OUT_DIR / "maersk_breakdowns.csv"   # formato "wide"
 RUN_LOG_CSV      = OUT_DIR / "maersk_run_log.csv"
-USER_DATA_DIR    = PROJECT_ROOT / ".pw-user-data-maersk"
+USER_DATA_DIR    = BROWSER_PROFILES_DIR / "maersk"
 LOG_DIR          = ARTIFACTS / "logs"
+SCREENS          = RUNTIME_DIR / "screens"
 
-SCREENS = PROJECT_ROOT / "screens"
-
-for p in [ARTIFACTS, ARTIFACTS/"input", OUT_DIR, LOG_DIR, SCREENS]:
+for p in [ARTIFACTS, ARTIFACTS/"input", OUT_DIR, LOG_DIR, RUNTIME_DIR, BROWSER_PROFILES_DIR, USER_DATA_DIR, SCREENS]:
     p.mkdir(parents=True, exist_ok=True)
 
 # Timeout maior para esperar os cards de resultado (ajustÃ¡vel via .env)

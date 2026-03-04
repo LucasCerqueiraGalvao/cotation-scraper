@@ -11,7 +11,7 @@ from typing import Dict, Tuple
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 LOG_DIR = PROJECT_ROOT / "artifacts" / "logs"
-SCREENS_DIR = PROJECT_ROOT / "screens"
+SCREENS_DIR = PROJECT_ROOT / "artifacts" / "runtime" / "screens"
 
 PARALLEL_STAGE = {
     "hapag": PROJECT_ROOT / "src" / "scrapers" / "hapag_instant_quote.py",

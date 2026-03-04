@@ -8,6 +8,7 @@ __pycache__/
 .pw-user-data-hapag/
 .pw-user-data-cma/
 .pw-user-data-*/
+.camoufox_localappdata/
 
 # artifacts (exceto input se quiser)
 artifacts/*

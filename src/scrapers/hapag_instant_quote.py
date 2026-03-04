@@ -4,6 +4,8 @@ import os
 import csv
 import time
 import subprocess
+import shutil
+import tempfile
 from pathlib import Path
 from datetime import datetime, timedelta
 import re
@@ -14,12 +16,23 @@ from dotenv import load_dotenv
 from playwright.sync_api import TimeoutError as PWTimeout
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_RUNTIME_DIR = PROJECT_ROOT / "artifacts" / "runtime"
+DEFAULT_LOCALAPPDATA = Path(os.getenv("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
+HAPAG_LOCAL_RUNTIME_DIR = Path(
+    os.getenv("HAPAG_LOCAL_RUNTIME_DIR", str(DEFAULT_LOCALAPPDATA / "CotationScrapersRuntime" / "hapag"))
+)
+BROWSER_PROFILES_DIR = HAPAG_LOCAL_RUNTIME_DIR / "playwright_profiles"
+HAPAG_PROFILE_DIR = BROWSER_PROFILES_DIR / "hapag"
+SCREENS_DIR = PROJECT_RUNTIME_DIR / "screens"
+LEGACY_HAPAG_PROFILE_DIR = PROJECT_RUNTIME_DIR / "playwright_profiles" / "hapag"
+LEGACY_CAMOUFOX_LOCALAPPDATA = PROJECT_RUNTIME_DIR / "camoufox_localappdata"
+CAMOUFOX_LOCALAPPDATA_DIR = HAPAG_LOCAL_RUNTIME_DIR / "camoufox_localappdata"
 
 # Evita virtualizacao de LocalAppData em Python da Microsoft Store (causa WinError 14001/mozglue).
 if os.name == "nt":
     os.environ.setdefault(
         "WIN_PD_OVERRIDE_LOCAL_APPDATA",
-        str(Path.home() / ".camoufox_localappdata"),
+        str(CAMOUFOX_LOCALAPPDATA_DIR),
     )
 
 try:
@@ -51,10 +64,33 @@ NEW_QUOTE_URL = "https://www.hapag-lloyd.com/solutions/new-quote/#/simple?langua
 
 JOBS_XLSX = PROJECT_ROOT / "artifacts" / "input" / "hapag_jobs.xlsx"
 OUTPUT_CSV = PROJECT_ROOT / "artifacts" / "output" / "hapag_breakdowns.csv"
-SCREENS_DIR = PROJECT_ROOT / "screens"
-SCREENS_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR = PROJECT_ROOT / "artifacts" / "logs"
-LOGS_DIR.mkdir(parents=True, exist_ok=True)
+for _path in [
+    PROJECT_RUNTIME_DIR,
+    HAPAG_LOCAL_RUNTIME_DIR,
+    BROWSER_PROFILES_DIR,
+    HAPAG_PROFILE_DIR,
+    CAMOUFOX_LOCALAPPDATA_DIR,
+    SCREENS_DIR,
+    LOGS_DIR,
+]:
+    _path.mkdir(parents=True, exist_ok=True)
+
+
+def _migrate_legacy_dir(src: Path, dst: Path) -> None:
+    """Migra cache/perfil antigo para o novo caminho (best-effort)."""
+    try:
+        if not src.exists() or dst.exists():
+            return
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dst))
+    except Exception:
+        # Sem interromper execucao se migracao falhar.
+        pass
+
+
+_migrate_legacy_dir(LEGACY_HAPAG_PROFILE_DIR, HAPAG_PROFILE_DIR)
+_migrate_legacy_dir(LEGACY_CAMOUFOX_LOCALAPPDATA, CAMOUFOX_LOCALAPPDATA_DIR)
 
 # colunas de charge que vamos manter fixas no CSV
 KNOWN_CHARGES = [
@@ -456,6 +492,48 @@ def validate_camoufox_executable(exe_path: str) -> None:
     except Exception:
         # Se a validação falhar por outro motivo transitório, o launch principal ainda tenta.
         pass
+
+
+def prepare_camoufox_runtime_executable(source_exe_path: str) -> str:
+    """
+    Copia o bundle do Camoufox para uma pasta de runtime estável (fora do cache interno),
+    mitigando falhas side-by-side intermitentes no caminho original.
+    """
+    src_exe = Path(source_exe_path)
+    if not src_exe.exists():
+        raise RuntimeError(f"Executavel Camoufox nao encontrado para preparo de runtime: {src_exe}")
+
+    runtime_dir = Path(
+        os.getenv(
+            "HAPAG_CAMOUFOX_RUNTIME_DIR",
+            str(Path(tempfile.gettempdir()) / "cotation_scrapers_camoufox_runtime"),
+        )
+    )
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+
+    dst_exe = runtime_dir / src_exe.name
+    marker = runtime_dir / ".source_signature"
+    src_signature = f"{src_exe}|{src_exe.stat().st_mtime_ns}|{src_exe.stat().st_size}"
+    force_sync = parse_env_bool("HAPAG_CAMOUFOX_FORCE_RUNTIME_SYNC", default=False)
+
+    current_signature = ""
+    if marker.exists():
+        try:
+            current_signature = marker.read_text(encoding="utf-8").strip()
+        except Exception:
+            current_signature = ""
+
+    needs_sync = force_sync or (not dst_exe.exists()) or (current_signature != src_signature)
+    if needs_sync:
+        for item in src_exe.parent.iterdir():
+            dst = runtime_dir / item.name
+            if item.is_dir():
+                shutil.copytree(item, dst, dirs_exist_ok=True)
+            else:
+                shutil.copy2(item, dst)
+        marker.write_text(src_signature, encoding="utf-8")
+
+    return str(dst_exe)
 
 
 def _debug_enabled() -> bool:
@@ -1408,42 +1486,163 @@ def select_spot_offer(page):
 
     page.locator("div.offer-card").first.wait_for(state="visible", timeout=card_visible_timeout_ms)
 
+    def _build_breakdown_button_list(scope):
+        """
+        Retorna botoes candidatos em ordem de prioridade:
+        1) botoes na area offer-card__buttons (onde costuma estar o "secundario")
+        2) qualquer outro botao "Price Breakdown" no escopo.
+        """
+        selectors = [
+            'div.offer-card__buttons button:has(span.block:has-text("Price Breakdown")):not([disabled]):not(.disabled)',
+            'button:has(span.block:has-text("Price Breakdown")):not([disabled]):not(.disabled)',
+        ]
+        buttons = []
+        seen = set()
+        for sel in selectors:
+            loc = scope.locator(sel)
+            cnt = loc.count()
+            for i in range(cnt):
+                btn = loc.nth(i)
+                try:
+                    handle = btn.element_handle()
+                    if handle is None:
+                        continue
+                    hid = handle.evaluate("el => el.outerHTML.slice(0, 220)")
+                    if hid in seen:
+                        continue
+                    seen.add(hid)
+                    buttons.append(btn)
+                except Exception:
+                    # se falhar dedupe por handle, ainda tenta usar o locator
+                    buttons.append(btn)
+        return buttons
+
+    def _try_click_button(btn, context_name: str, idx: int) -> bool:
+        try:
+            if not btn.is_visible():
+                return False
+        except Exception:
+            return False
+
+        try:
+            btn.scroll_into_view_if_needed()
+        except Exception:
+            pass
+
+        # 1) clique "normal"
+        try:
+            btn.click(force=True, timeout=breakdown_click_timeout_ms)
+            if wait_price_breakdown_ready(
+                page,
+                timeout_ms=breakdown_ready_timeout_ms,
+                poll_ms=breakdown_ready_poll_ms,
+            ):
+                log(f"Price Breakdown aberto via {context_name} (botao #{idx}).")
+                return True
+        except Exception as e:
+            debug_log(f"[PRICE_DETAILS] click normal falhou em {context_name}#{idx}: {e!r}")
+
+        # 2) fallback com evaluate click
+        try:
+            btn.evaluate("el => el.click()")
+            if wait_price_breakdown_ready(
+                page,
+                timeout_ms=breakdown_ready_timeout_ms,
+                poll_ms=breakdown_ready_poll_ms,
+            ):
+                log(f"Price Breakdown aberto via {context_name} (botao #{idx}, js-click).")
+                return True
+        except Exception as e:
+            debug_log(f"[PRICE_DETAILS] js click falhou em {context_name}#{idx}: {e!r}")
+
+        return False
+
     def _click_breakdown_from_card(card, card_name: str):
         # evita clicar em botoes desabilitados (ex.: Spot com "We cannot fulfill your request")
-        btn = card.locator(
-            'button:has(span.block:has-text("Price Breakdown")):not([disabled]):not(.disabled)'
-        ).first
-        if btn.count() == 0:
+        try:
+            card.wait_for(state="visible", timeout=breakdown_button_timeout_ms)
+        except Exception:
+            pass
+
+        buttons = _build_breakdown_button_list(card)
+        if not buttons:
             raise RuntimeError(f"Price Breakdown habilitado nao encontrado no card {card_name}.")
 
-        btn.wait_for(state="visible", timeout=breakdown_button_timeout_ms)
-        btn.scroll_into_view_if_needed()
-        btn.click(force=True, timeout=breakdown_click_timeout_ms)
-        if not wait_price_breakdown_ready(
-            page,
-            timeout_ms=breakdown_ready_timeout_ms,
-            poll_ms=breakdown_ready_poll_ms,
-        ):
-            raise RuntimeError(f"Price Breakdown nao ficou pronto no card {card_name}.")
-        log(f"Price Breakdown aberto via card {card_name}.")
+        for idx, btn in enumerate(buttons, start=1):
+            if _try_click_button(btn, f"card {card_name}", idx):
+                return
 
-    candidates = [
-        # 1) prioriza Spot
-        (
-            "Quick Quotes Spot",
-            page.locator('div.offer-card:has(h1:has-text("Quick Quotes Spot"))').first,
-        ),
-        # 2) fallback para Quick Quotes normal (QQ)
-        (
-            "Quick Quotes",
-            page.locator('div.offer-card:has(button[data-testid="offer-card-select-button-qq"])').first,
-        ),
-    ]
+        raise RuntimeError(f"Price Breakdown nao ficou pronto no card {card_name} apos tentar botoes secundarios.")
+
+    def _card_title(card) -> str:
+        try:
+            return (card.locator("h1").first.inner_text() or "").strip()
+        except Exception:
+            return ""
+
+    def _is_card_disabled(card) -> bool:
+        try:
+            classes = (card.get_attribute("class") or "").lower()
+            if "offer-card--disabled" in classes:
+                return True
+        except Exception:
+            pass
+        try:
+            enabled_breakdown = card.locator(
+                'div.offer-card__buttons button:has(span.block:has-text("Price Breakdown")):not([disabled]):not(.disabled)'
+            )
+            return enabled_breakdown.count() == 0
+        except Exception:
+            return False
+
+    def _pick_preferred_card(cards):
+        if not cards:
+            return None
+        for card in cards:
+            if not _is_card_disabled(card):
+                return card
+        return cards[0]
+
+    # Descobre os cards direto do carrossel para manter prioridade fixa:
+    # 1) Quick Quotes Spot, 2) Quick Quotes
+    cards_root = page.locator("div.simple-offers__carousel div.offer-card")
+    if cards_root.count() == 0:
+        cards_root = page.locator("div.offer-card")
+
+    spot_cards = []
+    qq_cards = []
+    for i in range(cards_root.count()):
+        card = cards_root.nth(i)
+        title = _card_title(card).lower()
+        has_spot_select = card.locator('button[data-testid="offer-card-select-button-spot"]').count() > 0
+        has_qq_select = card.locator('button[data-testid="offer-card-select-button-qq"]').count() > 0
+        has_spot_header = card.locator(".offer-card__header--qqs").count() > 0
+
+        is_spot = has_spot_select or has_spot_header or ("quick quotes spot" in title)
+        is_qq = has_qq_select or title == "quick quotes"
+
+        if is_spot:
+            spot_cards.append(card)
+        elif is_qq:
+            qq_cards.append(card)
+
+    candidates = []
+    preferred_spot = _pick_preferred_card(spot_cards)
+    preferred_qq = _pick_preferred_card(qq_cards)
+    if preferred_spot is not None:
+        candidates.append(("Quick Quotes Spot", preferred_spot))
+    if preferred_qq is not None:
+        candidates.append(("Quick Quotes", preferred_qq))
 
     errors = []
     for card_name, card in candidates:
         if card.count() == 0:
             errors.append(f"{card_name}: card nao encontrado")
+            continue
+
+        if _is_card_disabled(card):
+            errors.append(f"{card_name}: card desabilitado")
+            log(f"{card_name}: card desabilitado. Tentando proximo card...")
             continue
 
         try:
@@ -1455,24 +1654,14 @@ def select_spot_offer(page):
 
     try:
         # fallback final: qualquer card nao desabilitado com botao habilitado
-        global_btn = page.locator(
-            'div.offer-card:not(.offer-card--disabled) '
-            'button:has(span.block:has-text("Price Breakdown")):not([disabled]):not(.disabled)'
-        ).first
-        if global_btn.count() == 0:
+        global_scope = page.locator('div.offer-card:not(.offer-card--disabled)')
+        global_buttons = _build_breakdown_button_list(global_scope)
+        if not global_buttons:
             raise RuntimeError("Nenhum Price Breakdown habilitado encontrado no fallback global.")
-
-        global_btn.wait_for(state="visible", timeout=breakdown_button_timeout_ms)
-        global_btn.scroll_into_view_if_needed()
-        global_btn.click(force=True, timeout=breakdown_click_timeout_ms)
-        if not wait_price_breakdown_ready(
-            page,
-            timeout_ms=breakdown_ready_timeout_ms,
-            poll_ms=breakdown_ready_poll_ms,
-        ):
-            raise RuntimeError("Price Breakdown nao ficou pronto no fallback global.")
-        log("Price Breakdown aberto via fallback global.")
-        return
+        for idx, btn in enumerate(global_buttons, start=1):
+            if _try_click_button(btn, "fallback global", idx):
+                return
+        raise RuntimeError("Price Breakdown nao ficou pronto no fallback global.")
     except Exception as e:
         errors.append(f"fallback_global: {e!r}")
 
@@ -1874,10 +2063,12 @@ def main():
     accept_language = os.getenv("HAPAG_ACCEPT_LANGUAGE", "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7")
     after_login_sleep_sec = float(os.getenv("HAPAG_AFTER_LOGIN_SLEEP_SEC", "2"))
     keep_open_secs = float(os.getenv("HAPAG_KEEP_OPEN_SECS", "3"))
-    user_data_dir = os.getenv("HAPAG_USER_DATA_DIR", str(PROJECT_ROOT / ".pw-user-data-hapag"))
+    user_data_dir = os.getenv("HAPAG_USER_DATA_DIR", str(HAPAG_PROFILE_DIR))
+    Path(user_data_dir).mkdir(parents=True, exist_ok=True)
     camoufox_humanize = parse_env_bool("HAPAG_CAMOUFOX_HUMANIZE", default=True)
     camoufox_ignore_https_errors = parse_env_bool("HAPAG_CAMOUFOX_IGNORE_HTTPS_ERRORS", default=True)
-    camoufox_executable = resolve_camoufox_executable()
+    camoufox_executable_source = resolve_camoufox_executable()
+    camoufox_executable = prepare_camoufox_runtime_executable(camoufox_executable_source)
     validate_camoufox_executable(camoufox_executable)
 
     log(
@@ -1893,6 +2084,7 @@ def main():
         f"offers_timeout_ms={int(os.getenv('HAPAG_OFFERS_READY_TIMEOUT_MS', '45000'))} "
         f"user_data_dir={user_data_dir} humanize={camoufox_humanize} "
         f"ignore_https_errors={camoufox_ignore_https_errors} "
+        f"camoufox_executable_source={camoufox_executable_source} "
         f"camoufox_executable={camoufox_executable} "
         f"win_pd_override_local_appdata={os.getenv('WIN_PD_OVERRIDE_LOCAL_APPDATA', '')}"
     )

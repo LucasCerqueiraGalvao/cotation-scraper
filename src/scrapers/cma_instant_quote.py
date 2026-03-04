@@ -15,6 +15,8 @@ from playwright.sync_api import (
 # Caminhos
 # ----------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+RUNTIME_DIR = PROJECT_ROOT / "artifacts" / "runtime"
+BROWSER_PROFILES_DIR = RUNTIME_DIR / "playwright_profiles"
 
 INPUT_JOBS = PROJECT_ROOT / "artifacts" / "input" / "cma_jobs.xlsx"
 
@@ -23,7 +25,7 @@ CSV_OUT_DIR.mkdir(parents=True, exist_ok=True)
 CSV_FILE = CSV_OUT_DIR / "cma_breakdowns.csv"
 
 # Pasta fixa de cache/perfil do Playwright
-USER_DATA_DIR = PROJECT_ROOT / ".pw-user-data-cma"
+USER_DATA_DIR = BROWSER_PROFILES_DIR / "cma"
 USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # ----------------------------------------------------------------------
