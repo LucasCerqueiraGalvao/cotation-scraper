@@ -55,6 +55,7 @@ Opcional para caminhos (aceita relativo ao root do projeto):
 
 - `CMA_COTATIONS_FILE` (default: `artifacts/input/cma_cotations.xlsx`)
 - `SYNC_FOLDER` (default: `artifacts/sync_out`)
+- `PLANILHA_CLIENTE_SENHA` (default: `Lucas#2001`; senha de protecao da planilha final)
 
 Publicacao (upload do XLSX final):
 
@@ -72,6 +73,13 @@ Para upload direto no SharePoint (quando `UPLOAD_MODE=SHAREPOINT` ou `BOTH`):
 - `SHAREPOINT_SITE_ID` **ou** (`SHAREPOINT_HOSTNAME` + `SHAREPOINT_SITE_PATH`)
 - `SHAREPOINT_DRIVE_ID` (opcional; se vazio, usa o drive padrao do site)
 - `SHAREPOINT_FOLDER_PATH` (pasta destino dentro do drive, ex.: `Ceramic Customer Freight`)
+- `SHAREPOINT_TRY_CREATE_LINK` (default `TRUE`; tenta gerar link de compartilhamento apos upload)
+- `SHAREPOINT_LINK_SCOPE` (default `anonymous`; opcoes `anonymous`, `organization`, `users`)
+- `SHAREPOINT_LINK_TYPE` (default `view`; opcoes `view`, `edit`, `embed`)
+
+Observacao sobre link publico (`anonymous`):
+- Se o tenant/site bloquear compartilhamento anonimo, o script apenas registra aviso.
+- Nao existe contorno por codigo para essa restricao; a liberacao deve ser feita na politica do Microsoft 365/SharePoint.
 
 Opcionais Maersk:
 

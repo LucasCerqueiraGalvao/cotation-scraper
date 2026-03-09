@@ -1,5 +1,6 @@
 import math
 import os
+import re
 import subprocess
 import time
 import unicodedata
@@ -49,11 +50,10 @@ CMA_TRANSIT_COL_CANDIDATES = (
     "TEMPO DE TRANSPORTE",
 )
 CMA_FREE_TIME_COL_CANDIDATES = ("FREE TIME",)
+CMA_DTHC_COL_CANDIDATES = ("DTHC",)
 
 # Flags por rota
 DESTINATION_CHARGES_FILE = PROJECT_ROOT / "artifacts" / "input" / "destination_charges.xlsx"
-DEST_FLAG_COL_IN_FILE = "DESTINATION CHARGES"     # vazio ou 1
-DEST_FLAG_COL_INTERNAL = "use_destination_charges"
 
 USA_FLAG_COL_IN_FILE = "USA"                      # vazio ou 1
 USA_FLAG_COL_INTERNAL = "use_usa_import"
@@ -67,7 +67,7 @@ OUTPUT_FILE = PROJECT_ROOT / "artifacts" / "output" / "comparacao_carriers.csv"
 # ----------------------------------------------------------------------
 # Import fica False porque:
 # - Se USA=1 -> soma TODOS imports
-# - Se DESTINATION CHARGES=1 e USA!=1 -> soma SÓ itens específicos
+# - DTHC nunca entra no total comparado
 CATEGORY_FLAGS = {
     "ocean_freight": True,
     "export_surcharges": False,
@@ -194,6 +194,72 @@ def normalize_header_name(name: str) -> str:
         if not unicodedata.combining(ch)
     )
     return " ".join(no_accents.upper().strip().split())
+
+
+_DTHC_CURRENCY_RE = re.compile(r"\b([A-Z]{3})\b")
+_DTHC_NUMBER_RE = re.compile(r"[-+]?\d[\d.,]*")
+
+
+def _normalize_decimal_token(token: str) -> float | None:
+    if not token:
+        return None
+
+    s = token.strip()
+    if "," in s and "." in s:
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    elif "," in s:
+        parts = s.split(",")
+        if len(parts) == 2 and len(parts[1]) <= 2:
+            s = s.replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    elif "." in s:
+        parts = s.split(".")
+        if not (len(parts) == 2 and len(parts[1]) <= 2):
+            s = s.replace(".", "")
+
+    try:
+        return float(s)
+    except Exception:
+        return None
+
+
+def _format_decimal_plain(value: float) -> str:
+    if float(value).is_integer():
+        return str(int(value))
+    return f"{value:.6f}".rstrip("0").rstrip(".")
+
+
+def normalize_dthc_value(value):
+    """
+    Normaliza DTHC para o formato estrito "<valor> <moeda>".
+    Ex.: "$ 1.234,50 usd" -> "1234.5 USD"
+    """
+    if pd.isna(value):
+        return pd.NA
+
+    text = " ".join(str(value).strip().split())
+    if not text:
+        return pd.NA
+
+    text_upper = text.upper()
+    currency_match = _DTHC_CURRENCY_RE.search(text_upper)
+    if not currency_match:
+        return pd.NA
+    currency = currency_match.group(1)
+
+    number_match = _DTHC_NUMBER_RE.search(text_upper)
+    if not number_match:
+        return pd.NA
+
+    numeric = _normalize_decimal_token(number_match.group(0))
+    if numeric is None:
+        return pd.NA
+
+    return f"{_format_decimal_plain(numeric)} {currency}"
 
 
 def _is_any_process_running(process_names: list[str]) -> bool:
@@ -375,16 +441,28 @@ def load_cma_prices(file_path: Path) -> pd.DataFrame:
         rename_map[cma_free_time_src] = "cma_free_time"
         select_cols.append("cma_free_time")
 
+    cma_dthc_src = next(
+        (colmap[c] for c in CMA_DTHC_COL_CANDIDATES if c in colmap),
+        None,
+    )
+    if cma_dthc_src:
+        rename_map[cma_dthc_src] = "cma_dthc"
+        select_cols.append("cma_dthc")
+
     cma_prices = cma_df.rename(columns=rename_map)[select_cols].copy()
 
     cma_prices["indexador"] = normalize_indexador_series(cma_prices["indexador"])
     cma_prices["cma"] = pd.to_numeric(cma_prices["cma"], errors="coerce")
+    if "cma_dthc" in cma_prices.columns:
+        cma_prices["cma_dthc"] = cma_prices["cma_dthc"].map(normalize_dthc_value)
     cma_prices = cma_prices.dropna(subset=["indexador"])
 
     if "cma_transit_time" not in cma_prices.columns:
         cma_prices["cma_transit_time"] = pd.NA
     if "cma_free_time" not in cma_prices.columns:
         cma_prices["cma_free_time"] = pd.NA
+    if "cma_dthc" not in cma_prices.columns:
+        cma_prices["cma_dthc"] = pd.NA
 
     return cma_prices
 
@@ -486,33 +564,19 @@ def normalize_free_time_value(value):
 def compute_carrier_total(
     df: pd.DataFrame,
     mapping: dict,
-    dest_flag_col: str | None = None,
-    dest_extra_cols: list[str] | None = None,
     usa_flag_col: str | None = None,
+    dthc_exclude_cols: list[str] | None = None,
 ) -> pd.Series:
     """
     TOTAL BASE: soma categorias ativadas em CATEGORY_FLAGS.
 
     Regras por rota:
-      - Se USA=1: soma TODO import_surcharges (todas as colunas mapeadas em import),
-        exceto as que já entraram no base.
-      - Se DESTINATION CHARGES=1 e USA!=1: soma SÓ dest_extra_cols (itens específicos).
-
-    REGRA NOVA (THC USD-only):
-      - Para a HAPAG: qualquer coluna de THC (Terminal Handling...) dentro de Import Surcharges
-        só entra na soma se a coluna correspondente "<valor> | Curr" for "USD".
-      - Isso vale tanto no caso USA=1 (imports) quanto no caso DESTINATION CHARGES=1 (extras).
-      - Para Maersk, como o THC está no nome da coluna (ex.: "USD Terminal Handling Service - Destination"),
-        você controla isso escolhendo apenas a coluna USD no MAERSK_DEST_EXTRA (como já está).
+      - Base soma somente categorias ativadas em CATEGORY_FLAGS.
+      - Se USA=1, soma import_surcharges adicionais (fora da base).
+      - DTHC nunca entra no total comparado.
     """
 
-    # ---------------------------
-    # Helpers internos (sem depender de imports no topo)
-    # ---------------------------
-    import re
-
     def _clean_curr(x) -> str:
-        """Extrai código de moeda (USD/EUR/BRL...) de uma célula qualquer."""
         if x is None or pd.isna(x):
             return ""
         s = str(x).strip().upper()
@@ -520,11 +584,6 @@ def compute_carrier_total(
         return m.group(1) if m else ""
 
     def _is_hapag_thc_col(colname: str) -> bool:
-        """
-        Detecta colunas de THC no PADRÃO HAPAG (pipes):
-          "Import Surcharges | Terminal Handling Charge ... | 20STD"
-        Você pode deixar mais/menos estrito se quiser.
-        """
         c = str(colname).strip()
         return (
             c.startswith("Import Surcharges |")
@@ -533,15 +592,6 @@ def compute_carrier_total(
         )
 
     def sum_cols_usd_only_for_thc(df_: pd.DataFrame, cols_: list[str]) -> pd.Series:
-        """
-        Soma colunas numéricas, mas para colunas de THC (padrão Hapag),
-        só soma quando a coluna "<col> | Curr" for USD.
-
-        - Para colunas NÃO-THC: soma normal (como antes).
-        - Para colunas THC Hapag:
-            - se não existir a coluna de moeda -> NÃO soma (fica 0)
-            - se Curr != USD -> NÃO soma (fica 0)
-        """
         out = pd.Series(0.0, index=df_.index)
 
         for col in cols_:
@@ -550,15 +600,12 @@ def compute_carrier_total(
 
             vals = pd.to_numeric(df_[col], errors="coerce").fillna(0)
 
-            # Se NÃO for THC no padrão Hapag, soma normal
             if not _is_hapag_thc_col(col):
                 out = out + vals
                 continue
 
-            # Se for THC Hapag, exige Curr == USD
             curr_col = f"{col} | Curr"
             if curr_col not in df_.columns:
-                # sem informação de moeda -> não soma
                 continue
 
             currs = df_[curr_col].map(_clean_curr)
@@ -567,28 +614,15 @@ def compute_carrier_total(
 
         return out
 
-    # ---------------------------
-    # 1) total base (categorias ativadas)
-    # ---------------------------
+    excluded = {c for c in (dthc_exclude_cols or []) if c}
+
     cols_to_sum = set()
     for cat, cols in mapping.items():
         if CATEGORY_FLAGS.get(cat, False):
             cols_to_sum.update(cols)
+    cols_to_sum = {c for c in cols_to_sum if c not in excluded}
 
-    # base: soma padrão (não mexe aqui)
     total = sum_cols(df, list(cols_to_sum))
-
-    # ---------------------------
-    # flags
-    # ---------------------------
-    flag_dest = None
-    if dest_flag_col and dest_flag_col in df.columns:
-        flag_dest = (
-            pd.to_numeric(df[dest_flag_col], errors="coerce")
-            .fillna(0)
-            .astype(int)
-            .clip(0, 1)
-        )
 
     flag_usa = None
     if usa_flag_col and usa_flag_col in df.columns:
@@ -599,40 +633,15 @@ def compute_carrier_total(
             .clip(0, 1)
         )
 
-    # ---------------------------
-    # 2) USA -> soma TODOS imports (com regra nova de THC USD-only pra Hapag)
-    # ---------------------------
     if flag_usa is not None:
         import_cols = [
-            c for c in mapping.get("import_surcharges", [])
-            if c in df.columns and c not in cols_to_sum
+            c
+            for c in mapping.get("import_surcharges", [])
+            if c in df.columns and c not in cols_to_sum and c not in excluded
         ]
         if import_cols:
-            # Aqui aplicamos a regra:
-            # - colunas THC Hapag só entram se Curr == USD
-            # - resto soma normal
             import_total = sum_cols_usd_only_for_thc(df, import_cols)
             total = total + (import_total * flag_usa)
-
-    # ---------------------------
-    # 3) DESTINATION CHARGES -> soma só itens específicos (somente se USA!=1)
-    #     (também com regra nova THC USD-only pra Hapag)
-    # ---------------------------
-    if flag_dest is not None and dest_extra_cols:
-        extra_cols = [
-            c for c in dest_extra_cols
-            if c in df.columns and c not in cols_to_sum
-        ]
-        if extra_cols:
-            # Aplica mesma regra:
-            # - THC Hapag só soma se Curr == USD
-            extra_total = sum_cols_usd_only_for_thc(df, extra_cols)
-
-            if flag_usa is not None:
-                apply_mask = (flag_dest == 1) & (flag_usa != 1)
-                total = total + extra_total.where(apply_mask, 0)
-            else:
-                total = total + (extra_total * flag_dest)
 
     return total
 
@@ -674,7 +683,7 @@ routes_base = maersk_jobs[["indexador", "ORIGEM", "PORTO DE DESTINO"]].drop_dupl
 # ----------------------------------------------------------------------
 dest_df = pd.read_excel(DESTINATION_CHARGES_FILE)
 
-required = {"indexador", DEST_FLAG_COL_IN_FILE, USA_FLAG_COL_IN_FILE}
+required = {"indexador", USA_FLAG_COL_IN_FILE}
 missing = required - set(dest_df.columns)
 if missing:
     raise ValueError(
@@ -682,15 +691,8 @@ if missing:
         f"Faltando: {missing}"
     )
 
-dest_df = dest_df[["indexador", DEST_FLAG_COL_IN_FILE, USA_FLAG_COL_IN_FILE]].copy()
+dest_df = dest_df[["indexador", USA_FLAG_COL_IN_FILE]].copy()
 dest_df["indexador"] = normalize_indexador_series(dest_df["indexador"])
-
-dest_df[DEST_FLAG_COL_INTERNAL] = (
-    pd.to_numeric(dest_df[DEST_FLAG_COL_IN_FILE], errors="coerce")
-    .fillna(0)
-    .astype(int)
-    .clip(0, 1)
-)
 
 dest_df[USA_FLAG_COL_INTERNAL] = (
     pd.to_numeric(dest_df[USA_FLAG_COL_IN_FILE], errors="coerce")
@@ -699,13 +701,10 @@ dest_df[USA_FLAG_COL_INTERNAL] = (
     .clip(0, 1)
 )
 
-dest_flags = (
-    dest_df.groupby("indexador", as_index=False)[[DEST_FLAG_COL_INTERNAL, USA_FLAG_COL_INTERNAL]]
-    .max()
-)
+dest_flags = dest_df.groupby("indexador", as_index=False)[[USA_FLAG_COL_INTERNAL]].max()
 
 routes_base = routes_base.merge(dest_flags, on="indexador", how="left")
-for col in [DEST_FLAG_COL_INTERNAL, USA_FLAG_COL_INTERNAL]:
+for col in [USA_FLAG_COL_INTERNAL]:
     routes_base[col] = (
         pd.to_numeric(routes_base[col], errors="coerce")
         .fillna(0)
@@ -743,7 +742,7 @@ if "indexador" in hapag_merged.columns:
     hapag_merged["indexador"] = normalize_indexador_series(hapag_merged["indexador"])
 
 hapag_merged = hapag_merged.merge(dest_flags, on="indexador", how="left")
-for col in [DEST_FLAG_COL_INTERNAL, USA_FLAG_COL_INTERNAL]:
+for col in [USA_FLAG_COL_INTERNAL]:
     hapag_merged[col] = (
         pd.to_numeric(hapag_merged[col], errors="coerce")
         .fillna(0)
@@ -765,7 +764,7 @@ if "indexador" in maersk_merged.columns:
     maersk_merged["indexador"] = normalize_indexador_series(maersk_merged["indexador"])
 
 maersk_merged = maersk_merged.merge(dest_flags, on="indexador", how="left")
-for col in [DEST_FLAG_COL_INTERNAL, USA_FLAG_COL_INTERNAL]:
+for col in [USA_FLAG_COL_INTERNAL]:
     maersk_merged[col] = (
         pd.to_numeric(maersk_merged[col], errors="coerce")
         .fillna(0)
@@ -777,18 +776,17 @@ for col in [DEST_FLAG_COL_INTERNAL, USA_FLAG_COL_INTERNAL]:
 # 3) Calcular total dinâmico para cada carrier
 #    + invalidar cotações antigas
 #    + USA=1 soma TODOS imports
-#    + destination charges=1 soma só item específico (se USA!=1)
+#    + DTHC nunca entra na soma comparada
 # ----------------------------------------------------------------------
 
-# HAPAG: item específico quando destination charges=1
-HAPAG_DEST_EXTRA = ["Import Surcharges | Terminal Handling Charge Dest. | 20STD"]
+# HAPAG: excluir DTHC da soma comparada
+HAPAG_DTHC_EXCLUDE = ["Import Surcharges | Terminal Handling Charge Dest. | 20STD"]
 
 hapag_merged["hapag"] = compute_carrier_total(
     hapag_merged,
     HAPAG_MAP,
-    dest_flag_col=DEST_FLAG_COL_INTERNAL,
-    dest_extra_cols=HAPAG_DEST_EXTRA,
     usa_flag_col=USA_FLAG_COL_INTERNAL,
+    dthc_exclude_cols=HAPAG_DTHC_EXCLUDE,
 )
 invalidate_old_quotes(hapag_merged, "hapag")
 if "Estimated Transportation Days" not in hapag_merged.columns:
@@ -805,15 +803,18 @@ cma_group = cma_prices.groupby("indexador", as_index=False).agg(
     cma_free_time=("cma_free_time", first_non_empty),
 )
 
-# MAERSK: item específico quando destination charges=1
-MAERSK_DEST_EXTRA = ["USD Terminal Handling Service - Destination"]
+# MAERSK: excluir DTHC da soma comparada
+MAERSK_DTHC_EXCLUDE = [
+    c
+    for c in MAERSK_MAP.get("import_surcharges", [])
+    if "Terminal Handling Service - Destination" in c
+]
 
 maersk_merged["maersk"] = compute_carrier_total(
     maersk_merged,
     MAERSK_MAP,
-    dest_flag_col=DEST_FLAG_COL_INTERNAL,
-    dest_extra_cols=MAERSK_DEST_EXTRA,
     usa_flag_col=USA_FLAG_COL_INTERNAL,
+    dthc_exclude_cols=MAERSK_DTHC_EXCLUDE,
 )
 invalidate_old_quotes(maersk_merged, "maersk")
 if "offer_transit_time" not in maersk_merged.columns:
@@ -853,7 +854,6 @@ base = base[
         "key",
         "ORIGEM",
         "PORTO DE DESTINO",
-        DEST_FLAG_COL_INTERNAL,
         USA_FLAG_COL_INTERNAL,
         "hapag",
         "cma",
