@@ -37,6 +37,9 @@ def resolve_env_path(env_name: str, default_path: Path) -> Path:
 CSV_INPUT = PROJECT_ROOT / "artifacts" / "output" / "comparacao_carriers.csv"
 XLSX_OUTPUT = PROJECT_ROOT / "artifacts" / "output" / "comparacao_carriers_cliente.xlsx"
 XLSX_OUTPUT_SPECIALS = (
+    PROJECT_ROOT / "artifacts" / "output" / "comparacao_carriers_cliente_special.xlsx"
+)
+XLSX_OUTPUT_SPECIALS_LEGACY = (
     PROJECT_ROOT / "artifacts" / "output" / "comparacao_carriers_cliente_specials_in_english.xlsx"
 )
 HAPAG_BREAKDOWNS = PROJECT_ROOT / "artifacts" / "output" / "hapag_breakdowns.csv"
@@ -397,6 +400,10 @@ def _series_to_non_empty_dict(series: pd.Series) -> dict[str, str]:
         if text:
             out[str(key)] = text
     return out
+
+
+def _client_output_files() -> list[Path]:
+    return [XLSX_OUTPUT, XLSX_OUTPUT_SPECIALS]
 
 
 def load_manual_file_dthc_map(path: Path, *, context: str) -> dict[str, str]:
@@ -771,6 +778,11 @@ def gerar_planilha_cliente():
 
     df_especiais = _filtrar_planilha_cliente_especiais(df_cliente)
     _salvar_planilha_cliente(df_especiais, XLSX_OUTPUT_SPECIALS, table_last_row_min=None)
+    if XLSX_OUTPUT_SPECIALS_LEGACY.exists():
+        try:
+            XLSX_OUTPUT_SPECIALS_LEGACY.unlink()
+        except Exception:
+            pass
     print(
         "[specials] planilha filtrada gerada em: "
         f"{XLSX_OUTPUT_SPECIALS} | linhas={len(df_especiais)}"
@@ -955,82 +967,92 @@ def _graph_create_share_link(
 
 
 def upload_para_sharepoint_direto() -> None:
-    if not XLSX_OUTPUT.exists():
-        raise FileNotFoundError(f"Arquivo XLSX nao encontrado: {XLSX_OUTPUT}")
+    files = _client_output_files()
+    missing = [p for p in files if not p.exists()]
+    if missing:
+        raise FileNotFoundError(
+            "Arquivo(s) XLSX nao encontrado(s): " + ", ".join(str(p) for p in missing)
+        )
 
     access_token = _graph_get_token()
     site_id = _graph_resolve_site_id(access_token)
     drive_id = _graph_resolve_drive_id(access_token, site_id)
 
     folder_path = (os.getenv("SHAREPOINT_FOLDER_PATH") or "").strip().strip("/\\")
-    remote_path = f"{folder_path}/{XLSX_OUTPUT.name}" if folder_path else XLSX_OUTPUT.name
-    encoded_remote_path = _encode_graph_path(remote_path)
+    for local_file in files:
+        remote_path = f"{folder_path}/{local_file.name}" if folder_path else local_file.name
+        encoded_remote_path = _encode_graph_path(remote_path)
 
-    upload_url = (
-        f"https://graph.microsoft.com/v1.0/drives/{quote(drive_id, safe='')}"
-        f"/root:/{encoded_remote_path}:/content"
-    )
-    payload = XLSX_OUTPUT.read_bytes()
-
-    result = _http_json_request(
-        "PUT",
-        upload_url,
-        headers={
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        },
-        body=payload,
-    )
-
-    remote_web_url = result.get("webUrl") or "(sem webUrl na resposta)"
-    print(f"[sharepoint] upload concluido com sucesso: {remote_web_url}")
-
-    if SHAREPOINT_TRY_CREATE_LINK:
-        if SHAREPOINT_LINK_SCOPE == "anonymous":
-            print(
-                "[sharepoint] info: tentando gerar link publico (anonymous). "
-                "Depende da politica do tenant/site."
-            )
-        share_url = _graph_create_share_link(
-            access_token,
-            drive_id,
-            encoded_remote_path,
-            scope=SHAREPOINT_LINK_SCOPE,
-            link_type=SHAREPOINT_LINK_TYPE,
+        upload_url = (
+            f"https://graph.microsoft.com/v1.0/drives/{quote(drive_id, safe='')}"
+            f"/root:/{encoded_remote_path}:/content"
         )
-        if share_url:
-            print(
-                f"[sharepoint] link de compartilhamento ({SHAREPOINT_LINK_SCOPE}/{SHAREPOINT_LINK_TYPE}): "
-                f"{share_url}"
+        payload = local_file.read_bytes()
+
+        result = _http_json_request(
+            "PUT",
+            upload_url,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            },
+            body=payload,
+        )
+
+        remote_web_url = result.get("webUrl") or "(sem webUrl na resposta)"
+        print(f"[sharepoint] upload concluido com sucesso ({local_file.name}): {remote_web_url}")
+
+        if SHAREPOINT_TRY_CREATE_LINK:
+            if SHAREPOINT_LINK_SCOPE == "anonymous":
+                print(
+                    "[sharepoint] info: tentando gerar link publico (anonymous). "
+                    "Depende da politica do tenant/site."
+                )
+            share_url = _graph_create_share_link(
+                access_token,
+                drive_id,
+                encoded_remote_path,
+                scope=SHAREPOINT_LINK_SCOPE,
+                link_type=SHAREPOINT_LINK_TYPE,
             )
+            if share_url:
+                print(
+                    f"[sharepoint] link ({local_file.name}) "
+                    f"({SHAREPOINT_LINK_SCOPE}/{SHAREPOINT_LINK_TYPE}): {share_url}"
+                )
 
 
 def copiar_para_pasta_sincronizada():
-    if not XLSX_OUTPUT.exists():
-        raise FileNotFoundError(f"Arquivo XLSX nao encontrado: {XLSX_OUTPUT}")
+    files = _client_output_files()
+    missing = [p for p in files if not p.exists()]
+    if missing:
+        raise FileNotFoundError(
+            "Arquivo(s) XLSX nao encontrado(s): " + ", ".join(str(p) for p in missing)
+        )
 
     SYNC_FOLDER.mkdir(parents=True, exist_ok=True)
 
     if UPLOAD_ENSURE_ONEDRIVE:
         ensure_onedrive_running()
 
-    destino = SYNC_FOLDER / XLSX_OUTPUT.name
-    print(f"Copiando arquivo para pasta sincronizada: {destino}")
+    for local_file in files:
+        destino = SYNC_FOLDER / local_file.name
+        print(f"Copiando arquivo para pasta sincronizada: {destino}")
 
-    shutil.copy2(XLSX_OUTPUT, destino)
-    try:
-        os.utime(destino, None)
-    except Exception:
-        pass
+        shutil.copy2(local_file, destino)
+        try:
+            os.utime(destino, None)
+        except Exception:
+            pass
 
-    if UPLOAD_SYNC_WAIT_SEC > 0:
-        if wait_file_stable(destino):
-            print(f"[sync] arquivo estabilizado para sincronizacao: {destino}")
-        else:
-            print(f"[sync] aviso: nao confirmei estabilidade do arquivo no tempo limite: {destino}")
+        if UPLOAD_SYNC_WAIT_SEC > 0:
+            if wait_file_stable(destino):
+                print(f"[sync] arquivo estabilizado para sincronizacao: {destino}")
+            else:
+                print(f"[sync] aviso: nao confirmei estabilidade do arquivo no tempo limite: {destino}")
 
     print("Copia concluida com sucesso.")
-    print("Cliente de sincronizacao local (OneDrive) foi acionado para sincronizar esse arquivo.")
+    print("Cliente de sincronizacao local (OneDrive) foi acionado para sincronizar os arquivos.")
 
 
 # =========================================

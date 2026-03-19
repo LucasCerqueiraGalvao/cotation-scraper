@@ -42,7 +42,7 @@ Entradas:
 Saidas:
 - `artifacts/output/comparacao_carriers.csv` (resultado consolidado da comparacao)
 - `artifacts/output/comparacao_carriers_cliente.xlsx` (planilha cliente completa)
-- `artifacts/output/comparacao_carriers_cliente_specials_in_english.xlsx` (planilha cliente filtrada por destinos com `SUAPE JOBS`)
+- `artifacts/output/comparacao_carriers_cliente_special.xlsx` (planilha cliente filtrada por destinos com `SUAPE JOBS`)
 
 ## Regras Especiais de Destino
 
@@ -50,7 +50,7 @@ Saidas:
   - Quando `1`, ativa regra de custos adicionais de importacao na comparacao.
 - Coluna `SUAPE JOBS` em `destination_charges.xlsx`:
   - Identifica destinos especiais.
-  - E usada para gerar automaticamente a planilha filtrada `comparacao_carriers_cliente_specials_in_english.xlsx`.
+  - E usada para gerar automaticamente a planilha filtrada `comparacao_carriers_cliente_special.xlsx`.
 
 ## Estrutura de Pastas
 
