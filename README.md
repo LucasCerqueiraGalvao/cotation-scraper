@@ -15,6 +15,43 @@ Pipeline para coletar cotacoes de frete, comparar carriers e gerar planilha fina
      - `src/processing/quote_comparison.py`
      - `src/export/upload_fretes.py`
 
+Observacoes importantes:
+- O runner diario nao executa scraper da CMA.
+- As cotacoes de `cma`, `one` e `zim` entram por planilhas manuais sincronizadas (SharePoint/OneDrive).
+- A comparacao final considera `hapag`, `maersk`, `cma`, `one` e `zim`.
+
+## Fontes por Armador
+
+- `hapag`: scraper (`src/scrapers/hapag_instant_quote.py`) + `artifacts/output/hapag_breakdowns.csv`.
+- `maersk`: scraper (`src/scrapers/maersk_instant_quote.py`) + `artifacts/output/maersk_breakdowns.csv`.
+- `cma`: planilha manual (`CMA_COTATIONS_FILE`).
+- `one`: planilha manual (`ONE_COTATIONS_FILE`).
+- `zim`: planilha manual (`ZIM_COTATIONS_FILE`).
+
+## Entradas e Saidas Principais
+
+Entradas:
+- `artifacts/input/maersk_jobs.xlsx`
+- `artifacts/input/hapag_jobs.xlsx`
+- `artifacts/input/cma_jobs.xlsx`
+- `artifacts/input/destination_charges.xlsx`
+- `CMA_COTATIONS_FILE` (default `artifacts/input/cma_cotations.xlsx`)
+- `ONE_COTATIONS_FILE` (default `one_cotations.xlsx` na mesma pasta do CMA)
+- `ZIM_COTATIONS_FILE` (default `zim_cotations.xlsx` na mesma pasta do CMA)
+
+Saidas:
+- `artifacts/output/comparacao_carriers.csv` (resultado consolidado da comparacao)
+- `artifacts/output/comparacao_carriers_cliente.xlsx` (planilha cliente completa)
+- `artifacts/output/comparacao_carriers_cliente_specials_in_english.xlsx` (planilha cliente filtrada por destinos com `SUAPE JOBS`)
+
+## Regras Especiais de Destino
+
+- Coluna `USA` em `destination_charges.xlsx`:
+  - Quando `1`, ativa regra de custos adicionais de importacao na comparacao.
+- Coluna `SUAPE JOBS` em `destination_charges.xlsx`:
+  - Identifica destinos especiais.
+  - E usada para gerar automaticamente a planilha filtrada `comparacao_carriers_cliente_specials_in_english.xlsx`.
+
 ## Estrutura de Pastas
 
 - `src/orchestration`: orquestracao do pipeline.
@@ -54,6 +91,8 @@ Obrigatorias (credenciais):
 Opcional para caminhos (aceita relativo ao root do projeto):
 
 - `CMA_COTATIONS_FILE` (default: `artifacts/input/cma_cotations.xlsx`)
+- `ONE_COTATIONS_FILE` (default: mesma pasta de `CMA_COTATIONS_FILE`, arquivo `one_cotations.xlsx`)
+- `ZIM_COTATIONS_FILE` (default: mesma pasta de `CMA_COTATIONS_FILE`, arquivo `zim_cotations.xlsx`)
 - `SYNC_FOLDER` (default: `artifacts/sync_out`)
 - `PLANILHA_CLIENTE_SENHA` (default: `Lucas#2001`; senha de protecao da planilha final)
 

@@ -36,13 +36,25 @@ def resolve_env_path(env_name: str, default_path: Path) -> Path:
 # Arquivos locais (onde o pipeline ja grava o CSV)
 CSV_INPUT = PROJECT_ROOT / "artifacts" / "output" / "comparacao_carriers.csv"
 XLSX_OUTPUT = PROJECT_ROOT / "artifacts" / "output" / "comparacao_carriers_cliente.xlsx"
+XLSX_OUTPUT_SPECIALS = (
+    PROJECT_ROOT / "artifacts" / "output" / "comparacao_carriers_cliente_specials_in_english.xlsx"
+)
 HAPAG_BREAKDOWNS = PROJECT_ROOT / "artifacts" / "output" / "hapag_breakdowns.csv"
 MAERSK_BREAKDOWNS = PROJECT_ROOT / "artifacts" / "output" / "maersk_breakdowns.csv"
 HAPAG_JOBS = PROJECT_ROOT / "artifacts" / "input" / "hapag_jobs.xlsx"
 MAERSK_JOBS = PROJECT_ROOT / "artifacts" / "input" / "maersk_jobs.xlsx"
+DESTINATION_CHARGES_FILE = PROJECT_ROOT / "artifacts" / "input" / "destination_charges.xlsx"
 CMA_COTATIONS_FILE = resolve_env_path(
     "CMA_COTATIONS_FILE",
     PROJECT_ROOT / "artifacts" / "input" / "cma_cotations.xlsx",
+)
+ONE_COTATIONS_FILE = resolve_env_path(
+    "ONE_COTATIONS_FILE",
+    CMA_COTATIONS_FILE.parent / "one_cotations.xlsx",
+)
+ZIM_COTATIONS_FILE = resolve_env_path(
+    "ZIM_COTATIONS_FILE",
+    CMA_COTATIONS_FILE.parent / "zim_cotations.xlsx",
 )
 
 # Pasta sincronizada com OneDrive / SharePoint
@@ -387,8 +399,8 @@ def _series_to_non_empty_dict(series: pd.Series) -> dict[str, str]:
     return out
 
 
-def load_cma_dthc_map() -> dict[str, str]:
-    cma_df = _safe_read_excel(CMA_COTATIONS_FILE, context="cma_cotations")
+def load_manual_file_dthc_map(path: Path, *, context: str) -> dict[str, str]:
+    cma_df = _safe_read_excel(path, context=context)
     if cma_df.empty:
         return {}
 
@@ -401,7 +413,7 @@ def load_cma_dthc_map() -> dict[str, str]:
     required = {"INDEXADOR", "DTHC"}
     missing = required - set(colmap)
     if missing:
-        print(f"[dthc] aviso: cma_cotations sem colunas para DTHC: {sorted(missing)}")
+        print(f"[dthc] aviso: {context} sem colunas para DTHC: {sorted(missing)}")
         return {}
 
     idx_col = colmap["INDEXADOR"]
@@ -416,6 +428,18 @@ def load_cma_dthc_map() -> dict[str, str]:
 
     grouped = base.groupby("indexador", as_index=True)["dthc"].agg(first_non_empty)
     return _series_to_non_empty_dict(grouped)
+
+
+def load_cma_dthc_map() -> dict[str, str]:
+    return load_manual_file_dthc_map(CMA_COTATIONS_FILE, context="cma_cotations")
+
+
+def load_one_dthc_map() -> dict[str, str]:
+    return load_manual_file_dthc_map(ONE_COTATIONS_FILE, context="one_cotations")
+
+
+def load_zim_dthc_map() -> dict[str, str]:
+    return load_manual_file_dthc_map(ZIM_COTATIONS_FILE, context="zim_cotations")
 
 
 def load_hapag_dthc_map() -> dict[str, str]:
@@ -517,6 +541,10 @@ def resolve_winner_dthc_series(df: pd.DataFrame) -> pd.Series:
     carrier_maps: dict[str, dict[str, str]] = {}
     if "cma" in needed:
         carrier_maps["cma"] = load_cma_dthc_map()
+    if "one" in needed:
+        carrier_maps["one"] = load_one_dthc_map()
+    if "zim" in needed:
+        carrier_maps["zim"] = load_zim_dthc_map()
     if "hapag" in needed:
         carrier_maps["hapag"] = load_hapag_dthc_map()
     if "maersk" in needed:
@@ -539,6 +567,10 @@ def check_config():
     print("DEBUG PROJECT_ROOT:", PROJECT_ROOT)
     print("DEBUG CSV_INPUT:", CSV_INPUT)
     print("DEBUG XLSX_OUTPUT:", XLSX_OUTPUT)
+    print("DEBUG XLSX_OUTPUT_SPECIALS:", XLSX_OUTPUT_SPECIALS)
+    print("DEBUG DESTINATION_CHARGES_FILE:", DESTINATION_CHARGES_FILE)
+    print("DEBUG ONE_COTATIONS_FILE:", ONE_COTATIONS_FILE)
+    print("DEBUG ZIM_COTATIONS_FILE:", ZIM_COTATIONS_FILE)
     print("DEBUG SYNC_FOLDER:", SYNC_FOLDER)
     print("DEBUG UPLOAD_MODE:", UPLOAD_MODE)
     print("DEBUG SHAREPOINT_TRY_CREATE_LINK:", SHAREPOINT_TRY_CREATE_LINK)
@@ -553,7 +585,11 @@ def check_config():
         print(f"AVISO: pasta de sincronizacao nao existia e foi criada: {SYNC_FOLDER}")
 
 
-def aplicar_layout_planilha(ws, total_linhas_dados: int):
+def aplicar_layout_planilha(
+    ws,
+    total_linhas_dados: int,
+    table_last_row_min: int | None = TABLE_LAST_ROW_MIN,
+):
     """Aplica layout visual da planilha do cliente."""
     ws["H1"] = OBSERVACAO_CLIENTE
     ws["H1"].alignment = Alignment(horizontal="justify", vertical="center", wrap_text=False)
@@ -590,8 +626,11 @@ def aplicar_layout_planilha(ws, total_linhas_dados: int):
     for row_num in range(2, total_linhas_dados + 2):
         ws[f"D{row_num}"].number_format = "#,##0.00"
 
-    # A tabela cobre as colunas A:G e no minimo ate TABLE_LAST_ROW_MIN.
-    table_last_row = max(TABLE_LAST_ROW_MIN, total_linhas_dados + 1)
+    # A tabela cobre as colunas A:G e pode usar um minimo fixo para manter layout padrao.
+    if table_last_row_min is None:
+        table_last_row = max(2, total_linhas_dados + 1)
+    else:
+        table_last_row = max(table_last_row_min, total_linhas_dados + 1)
     tabela = Table(displayName="TabelaFretesCliente", ref=f"A1:G{table_last_row}")
     tabela.tableStyleInfo = TableStyleInfo(
         name="TableStyleMedium2",
@@ -609,6 +648,66 @@ def aplicar_protecao_planilha(ws):
     ws.protection.password = PLANILHA_CLIENTE_SENHA
 
 
+def _build_suape_special_destinations_set() -> set[str]:
+    dest_df = _safe_read_excel(DESTINATION_CHARGES_FILE, context="destination_charges")
+    if dest_df.empty:
+        print("[specials] aviso: destination_charges vazio/ausente; planilha de especiais ficara vazia.")
+        return set()
+
+    col_map = {normalize_header_name(c): c for c in dest_df.columns}
+    dest_col = col_map.get("PORTO DE DESTINO")
+    suape_col = col_map.get("SUAPE JOBS")
+
+    if not dest_col or not suape_col:
+        print(
+            "[specials] aviso: colunas 'PORTO DE DESTINO' e/ou 'SUAPE JOBS' nao encontradas; "
+            "planilha de especiais ficara vazia."
+        )
+        return set()
+
+    raw_flag = dest_df[suape_col]
+    numeric_flag = pd.to_numeric(raw_flag, errors="coerce").fillna(0) > 0
+    non_empty_flag = raw_flag.notna() & raw_flag.astype(str).str.strip().ne("")
+    flagged = dest_df[numeric_flag | non_empty_flag]
+
+    return {
+        str(v).strip()
+        for v in flagged[dest_col].dropna().tolist()
+        if str(v).strip()
+    }
+
+
+def _filtrar_planilha_cliente_especiais(df_cliente: pd.DataFrame) -> pd.DataFrame:
+    if "Porto de Destino" not in df_cliente.columns:
+        print("[specials] aviso: coluna 'Porto de Destino' ausente; retorno vazio.")
+        return df_cliente.iloc[0:0].copy()
+
+    special_destinations = _build_suape_special_destinations_set()
+    if not special_destinations:
+        return df_cliente.iloc[0:0].copy()
+
+    mask = df_cliente["Porto de Destino"].astype(str).str.strip().isin(special_destinations)
+    return df_cliente[mask].copy()
+
+
+def _salvar_planilha_cliente(
+    df_cliente: pd.DataFrame,
+    output_path: Path,
+    *,
+    table_last_row_min: int | None = TABLE_LAST_ROW_MIN,
+):
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        df_cliente.to_excel(writer, index=False, sheet_name="Fretes")
+        ws = writer.sheets["Fretes"]
+        aplicar_layout_planilha(
+            ws,
+            total_linhas_dados=len(df_cliente),
+            table_last_row_min=table_last_row_min,
+        )
+        aplicar_protecao_planilha(ws)
+
+
 # =========================================
 # 2) GERA A PLANILHA PARA O CLIENTE
 # =========================================
@@ -619,11 +718,14 @@ def gerar_planilha_cliente():
         raise FileNotFoundError(f"CSV de entrada nao encontrado: {CSV_INPUT}")
 
     # Le o CSV usando ; como separador e , como decimal.
+    # Mantemos transit_time como texto para evitar interpretacao de "26.0"
+    # como 260 quando thousands="." estiver ativo.
     df = pd.read_csv(
         CSV_INPUT,
         sep=";",
         decimal=",",
         thousands=".",
+        dtype={"transit_time": "string"},
     )
     df["winner_dthc"] = resolve_winner_dthc_series(df)
 
@@ -664,14 +766,15 @@ def gerar_planilha_cliente():
         }
     )
 
-    XLSX_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    with pd.ExcelWriter(XLSX_OUTPUT, engine="openpyxl") as writer:
-        df_cliente.to_excel(writer, index=False, sheet_name="Fretes")
-        ws = writer.sheets["Fretes"]
-        aplicar_layout_planilha(ws, total_linhas_dados=len(df_cliente))
-        aplicar_protecao_planilha(ws)
-
+    _salvar_planilha_cliente(df_cliente, XLSX_OUTPUT, table_last_row_min=TABLE_LAST_ROW_MIN)
     print(f"Planilha do cliente gerada em: {XLSX_OUTPUT}")
+
+    df_especiais = _filtrar_planilha_cliente_especiais(df_cliente)
+    _salvar_planilha_cliente(df_especiais, XLSX_OUTPUT_SPECIALS, table_last_row_min=None)
+    print(
+        "[specials] planilha filtrada gerada em: "
+        f"{XLSX_OUTPUT_SPECIALS} | linhas={len(df_especiais)}"
+    )
 
 
 # =========================================

@@ -39,6 +39,20 @@ CMA_COTATIONS_FILE = resolve_env_path(
     "CMA_COTATIONS_FILE",
     PROJECT_ROOT / "artifacts" / "input" / "cma_cotations.xlsx",
 )
+ONE_COTATIONS_FILE = resolve_env_path(
+    "ONE_COTATIONS_FILE",
+    CMA_COTATIONS_FILE.parent / "one_cotations.xlsx",
+)
+ZIM_COTATIONS_FILE = resolve_env_path(
+    "ZIM_COTATIONS_FILE",
+    CMA_COTATIONS_FILE.parent / "zim_cotations.xlsx",
+)
+MANUAL_COTATION_FILES = {
+    "cma": CMA_COTATIONS_FILE,
+    "one": ONE_COTATIONS_FILE,
+    "zim": ZIM_COTATIONS_FILE,
+}
+PRICE_CARRIERS = ["hapag", "cma", "one", "zim", "maersk"]
 CMA_REQUIRED_COLUMNS = {
     "INDEXADOR",
     "ORIGEM",
@@ -381,7 +395,7 @@ def wait_file_stable(file_path: Path, timeout_sec: int = SYNC_WAIT_TIMEOUT_SEC, 
     return file_path.exists()
 
 
-def ensure_cma_file_synced(file_path: Path) -> None:
+def ensure_quotes_file_synced(file_path: Path) -> None:
     if not SYNC_BEFORE_CMA_READ:
         return
 
@@ -398,11 +412,20 @@ def ensure_cma_file_synced(file_path: Path) -> None:
         print(f"[sync] aviso: nao consegui confirmar sincronizacao completa: {file_path}")
 
 
-def load_cma_prices(file_path: Path) -> pd.DataFrame:
-    ensure_cma_file_synced(file_path)
+def ensure_cma_file_synced(file_path: Path) -> None:
+    """Compatibilidade retroativa: mantido para chamadas legadas."""
+    ensure_quotes_file_synced(file_path)
+
+
+def load_manual_carrier_prices(file_path: Path, carrier_slug: str) -> pd.DataFrame:
+    ensure_quotes_file_synced(file_path)
 
     if not file_path.exists():
-        raise FileNotFoundError(f"Arquivo da CMA nao encontrado: {file_path}")
+        raise FileNotFoundError(f"Arquivo de cotacoes do carrier '{carrier_slug}' nao encontrado: {file_path}")
+
+    carrier = str(carrier_slug or "").strip().lower()
+    if not carrier:
+        raise ValueError("carrier_slug invalido para leitura de cotacoes manuais.")
 
     cma_df = pd.read_excel(file_path)
     colmap = {}
@@ -421,50 +444,55 @@ def load_cma_prices(file_path: Path) -> pd.DataFrame:
     cma_price_src = colmap["PRECO FINAL (USD)"]
     rename_map = {
         colmap["INDEXADOR"]: "indexador",
-        cma_price_src: "cma",
+        cma_price_src: carrier,
     }
-    select_cols = ["indexador", "cma"]
+    select_cols = ["indexador", carrier]
 
     cma_transit_src = next(
         (colmap[c] for c in CMA_TRANSIT_COL_CANDIDATES if c in colmap),
         None,
     )
     if cma_transit_src:
-        rename_map[cma_transit_src] = "cma_transit_time"
-        select_cols.append("cma_transit_time")
+        rename_map[cma_transit_src] = f"{carrier}_transit_time"
+        select_cols.append(f"{carrier}_transit_time")
 
     cma_free_time_src = next(
         (colmap[c] for c in CMA_FREE_TIME_COL_CANDIDATES if c in colmap),
         None,
     )
     if cma_free_time_src:
-        rename_map[cma_free_time_src] = "cma_free_time"
-        select_cols.append("cma_free_time")
+        rename_map[cma_free_time_src] = f"{carrier}_free_time"
+        select_cols.append(f"{carrier}_free_time")
 
     cma_dthc_src = next(
         (colmap[c] for c in CMA_DTHC_COL_CANDIDATES if c in colmap),
         None,
     )
     if cma_dthc_src:
-        rename_map[cma_dthc_src] = "cma_dthc"
-        select_cols.append("cma_dthc")
+        rename_map[cma_dthc_src] = f"{carrier}_dthc"
+        select_cols.append(f"{carrier}_dthc")
 
     cma_prices = cma_df.rename(columns=rename_map)[select_cols].copy()
 
     cma_prices["indexador"] = normalize_indexador_series(cma_prices["indexador"])
-    cma_prices["cma"] = pd.to_numeric(cma_prices["cma"], errors="coerce")
-    if "cma_dthc" in cma_prices.columns:
-        cma_prices["cma_dthc"] = cma_prices["cma_dthc"].map(normalize_dthc_value)
+    cma_prices[carrier] = pd.to_numeric(cma_prices[carrier], errors="coerce")
+    dthc_col = f"{carrier}_dthc"
+    if dthc_col in cma_prices.columns:
+        cma_prices[dthc_col] = cma_prices[dthc_col].map(normalize_dthc_value)
     cma_prices = cma_prices.dropna(subset=["indexador"])
 
-    if "cma_transit_time" not in cma_prices.columns:
-        cma_prices["cma_transit_time"] = pd.NA
-    if "cma_free_time" not in cma_prices.columns:
-        cma_prices["cma_free_time"] = pd.NA
-    if "cma_dthc" not in cma_prices.columns:
-        cma_prices["cma_dthc"] = pd.NA
+    if f"{carrier}_transit_time" not in cma_prices.columns:
+        cma_prices[f"{carrier}_transit_time"] = pd.NA
+    if f"{carrier}_free_time" not in cma_prices.columns:
+        cma_prices[f"{carrier}_free_time"] = pd.NA
+    if dthc_col not in cma_prices.columns:
+        cma_prices[dthc_col] = pd.NA
 
     return cma_prices
+
+
+def load_cma_prices(file_path: Path) -> pd.DataFrame:
+    return load_manual_carrier_prices(file_path, "cma")
 
 
 def sum_cols(df: pd.DataFrame, cols):
@@ -491,9 +519,8 @@ def first_non_empty(series: pd.Series):
 
 def best_price_and_carrier(row):
     valores = {
-        "hapag": row.get("hapag", math.nan),
-        "cma": row.get("cma", math.nan),
-        "maersk": row.get("maersk", math.nan),
+        carrier: row.get(carrier, math.nan)
+        for carrier in PRICE_CARRIERS
     }
     valores_validos = {
         k: v
@@ -511,12 +538,8 @@ def best_price_and_carrier(row):
 
 def winner_transit_time(row):
     carrier = row.get("best_carrier")
-    if carrier == "hapag":
-        return row.get("hapag_transit_time")
-    if carrier == "maersk":
-        return row.get("maersk_transit_time")
-    if carrier == "cma":
-        return row.get("cma_transit_time")
+    if carrier in PRICE_CARRIERS:
+        return row.get(f"{carrier}_transit_time")
     return pd.NA
 
 
@@ -526,8 +549,8 @@ def winner_free_time(row):
         return 10
     if carrier == "maersk":
         return 14
-    if carrier == "cma":
-        return row.get("cma_free_time")
+    if carrier in {"cma", "one", "zim"}:
+        return row.get(f"{carrier}_free_time")
     return pd.NA
 
 
@@ -716,8 +739,11 @@ for col in [USA_FLAG_COL_INTERNAL]:
 # 2) Ler dados por carrier e trazer o indexador
 # ----------------------------------------------------------------------
 
-# --- CMA (preco final direto da planilha dedicada) ---
-cma_prices = load_cma_prices(CMA_COTATIONS_FILE)
+# --- COTAÇÕES MANUAIS (preco final direto das planilhas dedicadas) ---
+manual_prices = {
+    carrier: load_manual_carrier_prices(path, carrier)
+    for carrier, path in MANUAL_COTATION_FILES.items()
+}
 
 # --- HAPAG ---
 hapag_df = pd.read_csv(HAPAG_BREAKDOWNS)
@@ -796,12 +822,15 @@ hapag_group = hapag_merged.groupby("indexador", as_index=False).agg(
     hapag_transit_time=("Estimated Transportation Days", first_non_empty),
 )
 
-# CMA: usa diretamente PRECO FINAL (USD) da planilha cma_cotations.xlsx
-cma_group = cma_prices.groupby("indexador", as_index=False).agg(
-    cma=("cma", "max"),
-    cma_transit_time=("cma_transit_time", first_non_empty),
-    cma_free_time=("cma_free_time", first_non_empty),
-)
+manual_groups = {}
+for carrier, frame in manual_prices.items():
+    manual_groups[carrier] = frame.groupby("indexador", as_index=False).agg(
+        **{
+            carrier: (carrier, "max"),
+            f"{carrier}_transit_time": (f"{carrier}_transit_time", first_non_empty),
+            f"{carrier}_free_time": (f"{carrier}_free_time", first_non_empty),
+        }
+    )
 
 # MAERSK: excluir DTHC da soma comparada
 MAERSK_DTHC_EXCLUDE = [
@@ -830,10 +859,11 @@ maersk_group = maersk_merged.groupby("indexador", as_index=False).agg(
 base = routes_base.copy()  # indexador, ORIGEM, PORTO DE DESTINO, flags
 
 base = base.merge(hapag_group, on="indexador", how="left")
-base = base.merge(cma_group, on="indexador", how="left")
+for carrier in ["cma", "one", "zim"]:
+    base = base.merge(manual_groups[carrier], on="indexador", how="left")
 base = base.merge(maersk_group, on="indexador", how="left")
 
-for col in ["hapag", "cma", "maersk"]:
+for col in PRICE_CARRIERS:
     base[col] = pd.to_numeric(base[col], errors="coerce")
 
 # ----------------------------------------------------------------------
@@ -857,6 +887,8 @@ base = base[
         USA_FLAG_COL_INTERNAL,
         "hapag",
         "cma",
+        "one",
+        "zim",
         "maersk",
         "best_price",
         "best_carrier",
