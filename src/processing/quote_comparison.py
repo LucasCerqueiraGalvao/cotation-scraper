@@ -699,14 +699,13 @@ maersk_jobs = pd.read_excel(MAERSK_JOBS)
 if "indexador" in maersk_jobs.columns:
     maersk_jobs["indexador"] = normalize_indexador_series(maersk_jobs["indexador"])
 
-routes_base = maersk_jobs[["indexador", "ORIGEM", "PORTO DE DESTINO"]].drop_duplicates()
 
 # ----------------------------------------------------------------------
 # 1.1) Ler flags (destination charges + USA) e anexar na base
 # ----------------------------------------------------------------------
 dest_df = pd.read_excel(DESTINATION_CHARGES_FILE)
 
-required = {"indexador", USA_FLAG_COL_IN_FILE}
+required = {"indexador", "ORIGEM", "PORTO DE DESTINO", USA_FLAG_COL_IN_FILE}
 missing = required - set(dest_df.columns)
 if missing:
     raise ValueError(
@@ -714,8 +713,9 @@ if missing:
         f"Faltando: {missing}"
     )
 
-dest_df = dest_df[["indexador", USA_FLAG_COL_IN_FILE]].copy()
+dest_df = dest_df[["indexador", "ORIGEM", "PORTO DE DESTINO", USA_FLAG_COL_IN_FILE]].copy()
 dest_df["indexador"] = normalize_indexador_series(dest_df["indexador"])
+routes_base = dest_df[["indexador", "ORIGEM", "PORTO DE DESTINO"]].drop_duplicates()
 
 dest_df[USA_FLAG_COL_INTERNAL] = (
     pd.to_numeric(dest_df[USA_FLAG_COL_IN_FILE], errors="coerce")

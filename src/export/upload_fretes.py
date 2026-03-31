@@ -39,6 +39,9 @@ XLSX_OUTPUT = PROJECT_ROOT / "artifacts" / "output" / "comparacao_carriers_clien
 XLSX_OUTPUT_SPECIALS = (
     PROJECT_ROOT / "artifacts" / "output" / "comparacao_carriers_cliente_special.xlsx"
 )
+XLSX_OUTPUT_GRANITO = (
+    PROJECT_ROOT / "artifacts" / "output" / "comparacao_carriers_cliente_granito.xlsx"
+)
 XLSX_OUTPUT_SPECIALS_LEGACY = (
     PROJECT_ROOT / "artifacts" / "output" / "comparacao_carriers_cliente_specials_in_english.xlsx"
 )
@@ -73,6 +76,8 @@ OBSERVACAO_CLIENTE = (
 )
 PLANILHA_CLIENTE_SENHA = (os.getenv("PLANILHA_CLIENTE_SENHA") or "Lucas#2001").strip()
 TABLE_LAST_ROW_MIN = 223
+DEFAULT_CLIENT_MARKUP_USD = float(os.getenv("DEFAULT_CLIENT_MARKUP_USD", "100"))
+GRANITO_DEFAULT_MARKUP_USD = float(os.getenv("GRANITO_DEFAULT_MARKUP_USD", "200"))
 ONEDRIVE_START_TIMEOUT_SEC = int(os.getenv("ONEDRIVE_START_TIMEOUT_SEC", "30"))
 UPLOAD_SYNC_WAIT_SEC = int(os.getenv("UPLOAD_SYNC_WAIT_SEC", "30"))
 UPLOAD_ENSURE_ONEDRIVE = os.getenv("UPLOAD_ENSURE_ONEDRIVE", "TRUE").strip().lower() in {
@@ -403,7 +408,7 @@ def _series_to_non_empty_dict(series: pd.Series) -> dict[str, str]:
 
 
 def _client_output_files() -> list[Path]:
-    return [XLSX_OUTPUT, XLSX_OUTPUT_SPECIALS]
+    return [XLSX_OUTPUT, XLSX_OUTPUT_SPECIALS, XLSX_OUTPUT_GRANITO]
 
 
 def load_manual_file_dthc_map(path: Path, *, context: str) -> dict[str, str]:
@@ -575,11 +580,14 @@ def check_config():
     print("DEBUG CSV_INPUT:", CSV_INPUT)
     print("DEBUG XLSX_OUTPUT:", XLSX_OUTPUT)
     print("DEBUG XLSX_OUTPUT_SPECIALS:", XLSX_OUTPUT_SPECIALS)
+    print("DEBUG XLSX_OUTPUT_GRANITO:", XLSX_OUTPUT_GRANITO)
     print("DEBUG DESTINATION_CHARGES_FILE:", DESTINATION_CHARGES_FILE)
     print("DEBUG ONE_COTATIONS_FILE:", ONE_COTATIONS_FILE)
     print("DEBUG ZIM_COTATIONS_FILE:", ZIM_COTATIONS_FILE)
     print("DEBUG SYNC_FOLDER:", SYNC_FOLDER)
     print("DEBUG UPLOAD_MODE:", UPLOAD_MODE)
+    print("DEBUG DEFAULT_CLIENT_MARKUP_USD:", DEFAULT_CLIENT_MARKUP_USD)
+    print("DEBUG GRANITO_DEFAULT_MARKUP_USD:", GRANITO_DEFAULT_MARKUP_USD)
     print("DEBUG SHAREPOINT_TRY_CREATE_LINK:", SHAREPOINT_TRY_CREATE_LINK)
     print("DEBUG SHAREPOINT_LINK_SCOPE:", SHAREPOINT_LINK_SCOPE)
     print("DEBUG SHAREPOINT_LINK_TYPE:", SHAREPOINT_LINK_TYPE)
@@ -655,6 +663,12 @@ def aplicar_protecao_planilha(ws):
     ws.protection.password = PLANILHA_CLIENTE_SENHA
 
 
+def _build_truthy_flag_mask(series: pd.Series) -> pd.Series:
+    numeric_flag = pd.to_numeric(series, errors="coerce").fillna(0) > 0
+    non_empty_flag = series.notna() & series.astype(str).str.strip().ne("")
+    return numeric_flag | non_empty_flag
+
+
 def _build_suape_special_destinations_set() -> set[str]:
     dest_df = _safe_read_excel(DESTINATION_CHARGES_FILE, context="destination_charges")
     if dest_df.empty:
@@ -672,10 +686,7 @@ def _build_suape_special_destinations_set() -> set[str]:
         )
         return set()
 
-    raw_flag = dest_df[suape_col]
-    numeric_flag = pd.to_numeric(raw_flag, errors="coerce").fillna(0) > 0
-    non_empty_flag = raw_flag.notna() & raw_flag.astype(str).str.strip().ne("")
-    flagged = dest_df[numeric_flag | non_empty_flag]
+    flagged = dest_df[_build_truthy_flag_mask(dest_df[suape_col])]
 
     return {
         str(v).strip()
@@ -695,6 +706,66 @@ def _filtrar_planilha_cliente_especiais(df_cliente: pd.DataFrame) -> pd.DataFram
 
     mask = df_cliente["Porto de Destino"].astype(str).str.strip().isin(special_destinations)
     return df_cliente[mask].copy()
+
+
+def _build_granito_markup_by_indexador() -> dict[str, float]:
+    dest_df = _safe_read_excel(DESTINATION_CHARGES_FILE, context="destination_charges")
+    if dest_df.empty:
+        print("[granito] aviso: destination_charges vazio/ausente; planilha de granito ficara vazia.")
+        return {}
+
+    col_map = {normalize_header_name(c): c for c in dest_df.columns}
+    index_col = col_map.get("INDEXADOR")
+    flag_col = col_map.get("GRANITO JOBS")
+    markup_col = col_map.get("GRANITO MARKUP USD")
+
+    if not index_col or not flag_col:
+        print(
+            "[granito] aviso: colunas 'INDEXADOR' e/ou 'GRANITO JOBS' nao encontradas; "
+            "planilha de granito ficara vazia."
+        )
+        return {}
+
+    flagged = dest_df[_build_truthy_flag_mask(dest_df[flag_col])].copy()
+    if flagged.empty:
+        return {}
+
+    flagged["indexador"] = normalize_indexador_series(flagged[index_col])
+    flagged = flagged.dropna(subset=["indexador"])
+    if flagged.empty:
+        return {}
+
+    if markup_col:
+        flagged["granito_markup_usd"] = pd.to_numeric(flagged[markup_col], errors="coerce")
+    else:
+        flagged["granito_markup_usd"] = pd.NA
+
+    flagged["granito_markup_usd"] = (
+        flagged["granito_markup_usd"]
+        .where(flagged["granito_markup_usd"] > 0, GRANITO_DEFAULT_MARKUP_USD)
+        .fillna(GRANITO_DEFAULT_MARKUP_USD)
+    )
+
+    grouped = flagged.groupby("indexador", as_index=True)["granito_markup_usd"].max()
+    return {
+        str(idx): float(markup)
+        for idx, markup in grouped.items()
+        if not pd.isna(idx)
+    }
+
+
+def _rename_planilha_cliente_columns(df_cliente: pd.DataFrame) -> pd.DataFrame:
+    return df_cliente.rename(
+        columns={
+            "ORIGEM": "Origem",
+            "PORTO DE DESTINO": "Porto de Destino",
+            "winner_dthc": "DTHC",
+            "best_price": "Frete para 20'Dry (USD)",
+            "best_carrier": "Armador",
+            "transit_time": "Transit Time",
+            "free_time": "Free Time",
+        }
+    )
 
 
 def _salvar_planilha_cliente(
@@ -742,6 +813,7 @@ def gerar_planilha_cliente():
     wanted_cols = [
         "ORIGEM",
         "PORTO DE DESTINO",
+        "indexador",
         "winner_dthc",
         "best_price",
         "best_carrier",
@@ -753,28 +825,41 @@ def gerar_planilha_cliente():
         df[col] = pd.NA
         print(f"AVISO: coluna ausente no CSV, preenchendo vazio: {col}")
 
-    # Mantem apenas as colunas desejadas.
-    df_cliente = df[wanted_cols].copy()
+    # Mantem apenas as colunas desejadas e aplica normalizacao base.
+    df_cliente_base = df[wanted_cols].copy()
+    df_cliente_base["best_price"] = pd.to_numeric(df_cliente_base["best_price"], errors="coerce")
+    df_cliente_base["indexador"] = normalize_indexador_series(df_cliente_base["indexador"])
+    df_cliente_base["transit_time"] = df_cliente_base["transit_time"].map(formatar_transit_time)
 
-    # best_price ja vem como numero por causa do decimal=","
-    df_cliente["best_price"] = df_cliente["best_price"] + 100
-    df_cliente["transit_time"] = df_cliente["transit_time"].map(formatar_transit_time)
+    granito_markup_by_idx = _build_granito_markup_by_indexador()
+    if granito_markup_by_idx:
+        granite_mask = df_cliente_base["indexador"].astype("string").isin(granito_markup_by_idx)
+        print(f"[granito] rotas marcadas no destination_charges: {int(granite_mask.sum())}")
+    else:
+        granite_mask = pd.Series([False] * len(df_cliente_base), index=df_cliente_base.index)
+        print("[granito] nenhuma rota marcada; planilha de granito ficara vazia.")
+
+    # Planilha padrao: exclui rotas marcadas como GRANITO e aplica markup tradicional.
+    df_cliente = df_cliente_base[~granite_mask].copy()
+    df_cliente["best_price"] = df_cliente["best_price"] + DEFAULT_CLIENT_MARKUP_USD
+
+    # Planilha granito: somente rotas marcadas e markup especifico (default 200 USD).
+    df_granito = df_cliente_base[granite_mask].copy()
+    if not df_granito.empty:
+        granito_markups = (
+            df_granito["indexador"]
+            .astype("string")
+            .map(granito_markup_by_idx)
+            .fillna(GRANITO_DEFAULT_MARKUP_USD)
+        )
+        df_granito["best_price"] = df_granito["best_price"] + pd.to_numeric(granito_markups, errors="coerce")
 
     # Nomes finais do layout cliente.
-    df_cliente = df_cliente.rename(
-        columns={
-            "ORIGEM": "Origem",
-            "PORTO DE DESTINO": "Porto de Destino",
-            "winner_dthc": "DTHC",
-            "best_price": "Frete para 20'Dry (USD)",
-            "best_carrier": "Armador",
-            "transit_time": "Transit Time",
-            "free_time": "Free Time",
-        }
-    )
+    df_cliente = _rename_planilha_cliente_columns(df_cliente).drop(columns=["indexador"], errors="ignore")
+    df_granito = _rename_planilha_cliente_columns(df_granito).drop(columns=["indexador"], errors="ignore")
 
     _salvar_planilha_cliente(df_cliente, XLSX_OUTPUT, table_last_row_min=TABLE_LAST_ROW_MIN)
-    print(f"Planilha do cliente gerada em: {XLSX_OUTPUT}")
+    print(f"Planilha do cliente gerada em: {XLSX_OUTPUT} | linhas={len(df_cliente)}")
 
     df_especiais = _filtrar_planilha_cliente_especiais(df_cliente)
     _salvar_planilha_cliente(df_especiais, XLSX_OUTPUT_SPECIALS, table_last_row_min=None)
@@ -786,6 +871,12 @@ def gerar_planilha_cliente():
     print(
         "[specials] planilha filtrada gerada em: "
         f"{XLSX_OUTPUT_SPECIALS} | linhas={len(df_especiais)}"
+    )
+
+    _salvar_planilha_cliente(df_granito, XLSX_OUTPUT_GRANITO, table_last_row_min=None)
+    print(
+        "[granito] planilha filtrada gerada em: "
+        f"{XLSX_OUTPUT_GRANITO} | linhas={len(df_granito)}"
     )
 
 

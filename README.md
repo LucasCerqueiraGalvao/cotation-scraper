@@ -43,6 +43,7 @@ Saidas:
 - `artifacts/output/comparacao_carriers.csv` (resultado consolidado da comparacao)
 - `artifacts/output/comparacao_carriers_cliente.xlsx` (planilha cliente completa)
 - `artifacts/output/comparacao_carriers_cliente_special.xlsx` (planilha cliente filtrada por destinos com `SUAPE JOBS`)
+- `artifacts/output/comparacao_carriers_cliente_granito.xlsx` (planilha filtrada por `GRANITO JOBS`, com acrescimo especifico por rota)
 
 ## Regras Especiais de Destino
 
@@ -51,6 +52,11 @@ Saidas:
 - Coluna `SUAPE JOBS` em `destination_charges.xlsx`:
   - Identifica destinos especiais.
   - E usada para gerar automaticamente a planilha filtrada `comparacao_carriers_cliente_special.xlsx`.
+- Coluna `GRANITO JOBS` em `destination_charges.xlsx`:
+  - Quando marcada, a rota sai da planilha cliente padrao e entra apenas na planilha `comparacao_carriers_cliente_granito.xlsx`.
+- Coluna `GRANITO MARKUP USD` em `destination_charges.xlsx`:
+  - Acrescimo em USD aplicado por rota na planilha de granito.
+  - Quando vazio/invalido, usa default de `200`.
 
 ## Estrutura de Pastas
 
