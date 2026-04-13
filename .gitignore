@@ -22,5 +22,7 @@ artifacts/*
 
 # environment
 .env
+infra/azure/*.env
+infra/azure/*.ci.env
 
 screens/

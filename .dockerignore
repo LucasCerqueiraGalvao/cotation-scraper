@@ -1,0 +1,21 @@
+.git
+.gitignore
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.pyo
+*.pyd
+*.log
+.env
+.env.*
+
+# Local/runtime artifacts
+artifacts/logs/
+artifacts/output/
+artifacts/runtime/
+artifacts/sync_out/
+
+# Development docs and editor metadata
+docs/
+.vscode/

@@ -77,12 +77,19 @@ def cleanup_old_logs(summary_log: Path, keep_days: int) -> None:
     )
 
 
-def run_blocking(name: str, script_path: Path, log_path: Path, summary_log: Path, dry_run: bool = False) -> int:
+def run_blocking(
+    name: str,
+    script_path: Path,
+    log_path: Path,
+    summary_log: Path,
+    run_id: str,
+    dry_run: bool = False,
+) -> int:
     if not script_path.exists():
         raise FileNotFoundError(f"Script nao encontrado: {script_path}")
 
     cmd = [sys.executable, str(script_path)]
-    log(f"[{name}] iniciando: {' '.join(cmd)}", summary_log)
+    log(f"[{name}] iniciando (run_id={run_id}): {' '.join(cmd)}", summary_log)
 
     if dry_run:
         log(f"[{name}] dry-run: nao executado.", summary_log)
@@ -92,7 +99,12 @@ def run_blocking(name: str, script_path: Path, log_path: Path, summary_log: Path
 
     with log_path.open("a", encoding="utf-8") as lf:
         lf.write(f"[{now_ts()}] CMD: {' '.join(cmd)}\n")
+        lf.write(f"[{now_ts()}] RUN_ID: {run_id}\n")
         lf.flush()
+
+        run_env = os.environ.copy()
+        run_env["RUN_ID"] = run_id
+        run_env["PIPELINE_STAGE"] = name
 
         completed = subprocess.run(
             cmd,
@@ -101,6 +113,7 @@ def run_blocking(name: str, script_path: Path, log_path: Path, summary_log: Path
             stderr=subprocess.STDOUT,
             check=False,
             text=True,
+            env=run_env,
             creationflags=creationflags,
         )
 
@@ -119,7 +132,7 @@ def run_parallel_stage(summary_log: Path, run_id: str, dry_run: bool = False) ->
         cmd = [sys.executable, str(script_path)]
         log_path = LOG_DIR / f"{run_id}_{name}.log"
 
-        log(f"[{name}] iniciando em paralelo: {' '.join(cmd)}", summary_log)
+        log(f"[{name}] iniciando em paralelo (run_id={run_id}): {' '.join(cmd)}", summary_log)
 
         if dry_run:
             results[name] = 0
@@ -129,7 +142,12 @@ def run_parallel_stage(summary_log: Path, run_id: str, dry_run: bool = False) ->
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         lf = log_path.open("a", encoding="utf-8")
         lf.write(f"[{now_ts()}] CMD: {' '.join(cmd)}\n")
+        lf.write(f"[{now_ts()}] RUN_ID: {run_id}\n")
         lf.flush()
+
+        run_env = os.environ.copy()
+        run_env["RUN_ID"] = run_id
+        run_env["PIPELINE_STAGE"] = name
 
         proc = subprocess.Popen(
             cmd,
@@ -137,6 +155,7 @@ def run_parallel_stage(summary_log: Path, run_id: str, dry_run: bool = False) ->
             stdout=lf,
             stderr=subprocess.STDOUT,
             text=True,
+            env=run_env,
             creationflags=creationflags,
         )
         processes[name] = (proc, lf)
@@ -162,7 +181,7 @@ def main() -> int:
     run_id = build_run_id()
     summary_log = LOG_DIR / f"{run_id}_pipeline.log"
 
-    log("Pipeline iniciado.", summary_log)
+    log(f"Pipeline iniciado. run_id={run_id}", summary_log)
     reset_screens_dir(summary_log)
     cleanup_old_logs(summary_log, keep_days=log_retention_days)
 
@@ -176,13 +195,20 @@ def main() -> int:
 
     for name, script_path in SEQUENTIAL_STAGE.items():
         script_log = LOG_DIR / f"{run_id}_{name}.log"
-        rc = run_blocking(name=name, script_path=script_path, log_path=script_log, summary_log=summary_log, dry_run=args.dry_run)
+        rc = run_blocking(
+            name=name,
+            script_path=script_path,
+            log_path=script_log,
+            summary_log=summary_log,
+            run_id=run_id,
+            dry_run=args.dry_run,
+        )
         if rc != 0:
             log(f"Falha na etapa {name}.", summary_log)
             log("Pipeline encerrado com erro.", summary_log)
             return 1
 
-    log("Pipeline concluido com sucesso.", summary_log)
+    log(f"Pipeline concluido com sucesso. run_id={run_id}", summary_log)
     return 0
 
 

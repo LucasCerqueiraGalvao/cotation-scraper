@@ -14,6 +14,10 @@ from dotenv import load_dotenv
 # ----------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(PROJECT_ROOT / ".env", override=False)
+RUN_ID = (os.getenv("RUN_ID") or "").strip()
+PIPELINE_STAGE = (os.getenv("PIPELINE_STAGE") or "").strip()
+if RUN_ID:
+    print(f"[runtime] RUN_ID={RUN_ID} PIPELINE_STAGE={PIPELINE_STAGE or 'comparison'}")
 
 
 def resolve_env_path(env_name: str, default_path: Path) -> Path:

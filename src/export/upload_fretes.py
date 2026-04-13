@@ -21,6 +21,10 @@ from openpyxl.worksheet.table import Table, TableStyleInfo
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(PROJECT_ROOT / ".env", override=True)
+RUN_ID = (os.getenv("RUN_ID") or "").strip()
+PIPELINE_STAGE = (os.getenv("PIPELINE_STAGE") or "").strip()
+if RUN_ID:
+    print(f"[runtime] RUN_ID={RUN_ID} PIPELINE_STAGE={PIPELINE_STAGE or 'upload'}")
 
 
 def resolve_env_path(env_name: str, default_path: Path) -> Path:

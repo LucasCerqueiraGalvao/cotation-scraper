@@ -414,6 +414,23 @@ def parse_env_bool(name: str, default: bool = False) -> bool:
     return default
 
 
+def parse_browser_channel(name: str, default: str = "chrome") -> str | None:
+    """
+    Resolve o channel do browser para o Playwright.
+    - Default: chrome (compativel com execucao local atual).
+    - "", "bundled" ou "playwright": usa Chromium bundled (sem channel).
+    """
+    raw = os.getenv(name, default)
+    value = "" if raw is None else str(raw).strip()
+    if not value:
+        return None
+
+    lowered = value.lower()
+    if lowered in {"bundled", "playwright"}:
+        return None
+    return value
+
+
 def _safe_locator_count(page, selector: str) -> int:
     try:
         return page.locator(selector).count()
@@ -2812,6 +2829,7 @@ def main():
     maersk_user_agent = os.getenv("MAERSK_USER_AGENT", DEFAULT_MAERSK_USER_AGENT)
     maersk_stealth_enabled = parse_env_bool("MAERSK_STEALTH", default=True)
     maersk_ignore_enable_automation = parse_env_bool("MAERSK_IGNORE_ENABLE_AUTOMATION", default=True)
+    maersk_browser_channel = parse_browser_channel("MAERSK_BROWSER_CHANNEL", default="chrome")
 
     jobs = read_jobs_xlsx(INPUT_XLSX)
     if not jobs:
@@ -2826,7 +2844,6 @@ def main():
     with sync_playwright() as p:
         context_kwargs = {
             "user_data_dir": str(USER_DATA_DIR),
-            "channel": "chrome",
             "headless": maersk_headless,
             "viewport": {"width": maersk_viewport_width, "height": maersk_viewport_height},
             "locale": maersk_locale,
@@ -2842,6 +2859,10 @@ def main():
                 "--no-default-browser-check",
             ],
         }
+        if maersk_browser_channel:
+            context_kwargs["channel"] = maersk_browser_channel
+        else:
+            log("[cfg] MAERSK_BROWSER_CHANNEL=bundled/playwright: usando Chromium bundled do Playwright.")
         if maersk_ignore_enable_automation:
             context_kwargs["ignore_default_args"] = ["--enable-automation"]
 

@@ -143,6 +143,7 @@ Opcionais Maersk:
 - `MAERSK_USER_AGENT` (default Chrome desktop Windows)
 - `MAERSK_STEALTH` (default `TRUE`; injeta patches de fingerprint no contexto)
 - `MAERSK_IGNORE_ENABLE_AUTOMATION` (default `TRUE`)
+- `MAERSK_BROWSER_CHANNEL` (default `chrome`; use `bundled`/`playwright` para Chromium bundled sem canal instalado)
 - `MAERSK_DEBUG_RETRY` (default `FALSE`; logs detalhados do botao Retry)
 - `MAERSK_RESULTS_TIMEOUT_SEC` (default `45`)
 - `MAERSK_OFFER_CLICK_TIMEOUT_MS` (default `1800`; timeout por tentativa de clique no CTA do offer)
@@ -193,12 +194,27 @@ Opcionais gerais:
 - `SYNC_START_TIMEOUT_SEC` (default `20`)
 - `LOG_RETENTION_DAYS` (default `14`; `0` ou negativo desativa retencao)
 - `LOG_ASCII_ONLY` (default `1`; limpa terminal para ASCII e evita caracteres quebrados)
+- `MANUAL_QUOTES_SOURCE` (uso em preflight; `FILES` default, `GRAPH` ignora validacao de existencia local de `cma/one/zim`)
 
 ## Execucao
 
 Execucao manual completa:
 
 ```powershell
+.\.venv\Scripts\python.exe src\orchestration\daily_pipeline_runner.py
+```
+
+Preflight recomendado para ambiente cloud (valida envs/caminhos antes do run):
+
+```powershell
+.\.venv\Scripts\python.exe scripts\preflight_cloud_env.py
+```
+
+Execucao cloud-like local (sem dependencia de OneDrive desktop):
+
+```powershell
+$env:UPLOAD_MODE="SHAREPOINT"
+$env:UPLOAD_ENSURE_ONEDRIVE="FALSE"
 .\.venv\Scripts\python.exe src\orchestration\daily_pipeline_runner.py
 ```
 
@@ -243,6 +259,9 @@ Via wrapper `.cmd`:
 .\scripts\run_daily_pipeline.cmd
 ```
 
+Observacao do wrapper:
+- Resolucao de Python por prioridade: `.venv\\Scripts\\python.exe` -> `py -3` -> `python`.
+
 Exemplo para publicar direto no SharePoint (sem depender do cliente OneDrive sincronizar):
 
 ```powershell
@@ -257,3 +276,112 @@ Cria/atualiza tarefa no Task Scheduler:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\install_weekday_task.ps1 -StartTime "04:00"
 ```
+
+## Docker (Predeploy Local)
+
+Build da imagem:
+
+```powershell
+docker build -t cotation-scrapers:local .
+```
+
+Run cloud-like rapido (sem OneDrive desktop):
+
+```powershell
+$manualPath = "C:\Users\lucas\excels\Data Analisys Team - Documentos\Ceramic Customer Freight"
+
+docker run --rm `
+  --env-file .env `
+  -e UPLOAD_MODE=SHAREPOINT `
+  -e UPLOAD_ENSURE_ONEDRIVE=FALSE `
+  -e SYNC_BEFORE_CMA_READ=0 `
+  -e CMA_COTATIONS_FILE=/manual/cma_cotations.xlsx `
+  -e ONE_COTATIONS_FILE=/manual/one_cotations.xlsx `
+  -e ZIM_COTATIONS_FILE=/manual/zim_cotations.xlsx `
+  -e MAERSK_BROWSER_CHANNEL=bundled `
+  -v "${PWD}\artifacts:/app/artifacts" `
+  -v "${manualPath}:/manual:ro" `
+  cotation-scrapers:local
+```
+
+## Azure Bootstrap (Subplan 03)
+
+Preparar arquivo de ambiente:
+
+```powershell
+Copy-Item .\infra\azure\dev.env.example .\infra\azure\dev.env
+```
+
+Provisionar fundacao (RG, ACR, Log Analytics, Container Apps Env, Key Vault, Storage):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\infra\azure\provision_foundation.ps1 -EnvFile .\infra\azure\dev.env
+```
+
+Criar job manual (apos push da imagem no ACR):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\infra\azure\create_job_manual.ps1 -EnvFile .\infra\azure\dev.env -ImageTag latest
+```
+
+Pre-requisito:
+- Azure CLI instalado e sessao autenticada (`az login`).
+
+## Azure Ops (Subplans 04-08)
+
+Sincronizar segredos para Key Vault a partir do `.env` local:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\infra\azure\seed_keyvault_secrets_from_dotenv.ps1 -EnvFile .\infra\azure\dev.env -DotEnvFile .\.env
+```
+
+Configurar identidade do job, RBAC, registry auth e env vars/secrets:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\infra\azure\configure_job_identity_and_secrets.ps1 -EnvFile .\infra\azure\dev.env
+```
+
+Build/push de imagem para ACR:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\infra\azure\build_and_push_image.ps1 -EnvFile .\infra\azure\dev.env
+```
+
+Configurar job agendado:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\infra\azure\configure_job_schedule.ps1 -EnvFile .\infra\azure\dev.env -ImageTag latest -ForceRecreate
+```
+
+Executar smoke sem esperar job completo:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\infra\azure\start_job_smoke.ps1 -EnvFile .\infra\azure\dev.env -NoWait
+```
+
+Rollback para tag estavel:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\infra\azure\rollback_job_image.ps1 -EnvFile .\infra\azure\dev.env -RollbackTag <TAG> -StartAfterRollback
+```
+
+Observabilidade baseline:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\infra\azure\observability\create_alerts_baseline.ps1 -EnvFile .\infra\azure\dev.env -AlertEmail "<ops@company.com>"
+```
+
+Bootstrap unico (dev) para rodar quase tudo em sequencia:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\infra\azure\bootstrap_dev_all.ps1 -EnvFile .\infra\azure\dev.env -DotEnvFile .\.env -UseAcrBuild
+```
+
+## CI/CD (GitHub Actions)
+
+- `CI`: `.github/workflows/ci.yml`
+- `CD Dev`: `.github/workflows/cd-dev.yml`
+- `CD Prod`: `.github/workflows/cd-prod.yml`
+
+Detalhes de secrets/vars e release flow:
+- `docs/cicd_release_guide.md`
