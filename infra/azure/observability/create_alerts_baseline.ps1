@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$EnvFile = ".\infra\azure\dev.env",
     [string]$AlertEmail = "",
     [string]$ActionGroupName = "",
@@ -19,7 +19,7 @@ $jobName = Require-Setting -Config $cfg -Key "AZ_CONTAINERAPP_JOB_NAME"
 $envName = if ($cfg.ContainsKey("AZ_ENV")) { ($cfg["AZ_ENV"] | Out-String).Trim() } else { "dev" }
 
 if (-not $ActionGroupName) {
-    $ActionGroupName = "ag-cotation-scrapers-$envName"
+    $ActionGroupName = "ag-quotation-scrapers-$envName"
 }
 if (-not $AlertEmail -and $cfg.ContainsKey("AZ_ALERT_EMAIL")) {
     $AlertEmail = ($cfg["AZ_ALERT_EMAIL"] | Out-String).Trim()
@@ -82,3 +82,4 @@ Write-Host "Alerts baseline configured."
 Write-Host "- action_group: $ActionGroupName"
 Write-Host "- action_email: $AlertEmail"
 Write-Host "- alert_name: $alertName"
+

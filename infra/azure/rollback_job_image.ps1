@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$EnvFile = ".\infra\azure\dev.env",
     [string]$ImageName = "",
     [string]$RollbackTag,
@@ -21,8 +21,8 @@ $subscriptionId = Require-Setting -Config $cfg -Key "AZ_SUBSCRIPTION_ID"
 $resourceGroup = Require-Setting -Config $cfg -Key "AZ_RESOURCE_GROUP"
 $acrName = Require-Setting -Config $cfg -Key "AZ_ACR_NAME"
 $jobName = Require-Setting -Config $cfg -Key "AZ_CONTAINERAPP_JOB_NAME"
-$jobContainerName = if ($cfg.ContainsKey("AZ_JOB_CONTAINER_NAME")) { $cfg["AZ_JOB_CONTAINER_NAME"] } else { "cotation-scrapers" }
-$defaultImageName = if ($cfg.ContainsKey("AZ_IMAGE_NAME")) { $cfg["AZ_IMAGE_NAME"] } else { "cotation-scrapers" }
+$jobContainerName = if ($cfg.ContainsKey("AZ_JOB_CONTAINER_NAME")) { $cfg["AZ_JOB_CONTAINER_NAME"] } else { "quotation-scrapers" }
+$defaultImageName = if ($cfg.ContainsKey("AZ_IMAGE_NAME")) { $cfg["AZ_IMAGE_NAME"] } else { "quotation-scrapers" }
 
 if (-not $ImageName) {
     $ImageName = $defaultImageName
@@ -57,3 +57,4 @@ if ($StartAfterRollback) {
 }
 
 Write-Host "Rollback applied successfully."
+

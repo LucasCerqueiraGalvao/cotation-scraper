@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$EnvFile = ".\infra\azure\dev.env",
     [string]$ImageName = "",
     [string]$ImageTag = "",
@@ -16,7 +16,7 @@ $cfg = Load-EnvFile -Path $EnvFile
 $subscriptionId = Require-Setting -Config $cfg -Key "AZ_SUBSCRIPTION_ID"
 $resourceGroup = Require-Setting -Config $cfg -Key "AZ_RESOURCE_GROUP"
 $acrName = Require-Setting -Config $cfg -Key "AZ_ACR_NAME"
-$defaultImageName = if ($cfg.ContainsKey("AZ_IMAGE_NAME")) { ($cfg["AZ_IMAGE_NAME"] | Out-String).Trim() } else { "cotation-scrapers" }
+$defaultImageName = if ($cfg.ContainsKey("AZ_IMAGE_NAME")) { ($cfg["AZ_IMAGE_NAME"] | Out-String).Trim() } else { "quotation-scrapers" }
 
 if (-not $ImageName) {
     $ImageName = $defaultImageName
@@ -66,3 +66,4 @@ if ($UseAcrBuild) {
 
 Write-Host ""
 Write-Host "Image ready: $image"
+

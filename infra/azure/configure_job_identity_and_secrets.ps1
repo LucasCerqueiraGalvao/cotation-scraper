@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$EnvFile = ".\infra\azure\dev.env"
 )
 
@@ -47,7 +47,7 @@ $resourceGroup = Require-Setting -Config $cfg -Key "AZ_RESOURCE_GROUP"
 $acrName = Require-Setting -Config $cfg -Key "AZ_ACR_NAME"
 $keyVaultName = Require-Setting -Config $cfg -Key "AZ_KEYVAULT_NAME"
 $jobName = Require-Setting -Config $cfg -Key "AZ_CONTAINERAPP_JOB_NAME"
-$jobContainerName = if ($cfg.ContainsKey("AZ_JOB_CONTAINER_NAME")) { $cfg["AZ_JOB_CONTAINER_NAME"] } else { "cotation-scrapers" }
+$jobContainerName = if ($cfg.ContainsKey("AZ_JOB_CONTAINER_NAME")) { $cfg["AZ_JOB_CONTAINER_NAME"] } else { "quotation-scrapers" }
 
 Set-AzureSubscription -AzExe $azExe -SubscriptionId $subscriptionId
 
@@ -190,3 +190,4 @@ Write-Host "Job identity + secrets + env vars configured successfully."
 Write-Host "- principal_id: $principalId"
 Write-Host "- secrets_set: $($secretSpecs.Count)"
 Write-Host "- env_vars_set: $($envPairs.Count)"
+

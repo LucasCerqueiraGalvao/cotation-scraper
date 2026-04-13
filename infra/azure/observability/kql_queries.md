@@ -1,4 +1,4 @@
-# KQL Queries - Cotation Scrapers
+﻿# KQL Queries - Quotation Scrapers
 
 Use these queries in Log Analytics (workspace linked to Container Apps Environment).
 
@@ -72,4 +72,5 @@ ContainerAppConsoleLogs_CL
 | project TimeGenerated, Log_s
 | sort by TimeGenerated desc
 ```
+
 

@@ -1,4 +1,4 @@
-# Subplan - Preparar Ambiente Local em Docker para Deploy
+﻿# Subplan - Preparar Ambiente Local em Docker para Deploy
 
 > Nota: este arquivo foi mantido por compatibilidade. A versao oficial atual esta em:
 > `docs/subplans/subplan_02_local_docker_predeploy.md`.
@@ -86,7 +86,7 @@ Critero de saida:
 ## Comandos base (modelo)
 ## Build
 ```powershell
-docker build -t cotation-scrapers:local .
+docker build -t quotation-scrapers:local .
 ```
 
 ## Run (exemplo)
@@ -94,7 +94,7 @@ docker build -t cotation-scrapers:local .
 docker run --rm `
   --env-file .env `
   -v "${PWD}\\artifacts:C:\\app\\artifacts" `
-  cotation-scrapers:local
+  quotation-scrapers:local
 ```
 
 Observacao:
@@ -121,3 +121,4 @@ Mitigacoes:
 - Execucao local em Docker sem erro.
 - Upload SharePoint validado.
 - Documentacao de operacao atualizada.
+

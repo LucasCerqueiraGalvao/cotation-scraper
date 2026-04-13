@@ -1,11 +1,11 @@
-# Runbook - Cloud Operations
+﻿# Runbook - Cloud Operations
 
 Status: active  
 Last update: 2026-03-31
 
 ## Scope
 
-Operational procedures for Azure Container Apps Job execution of Cotation Scrapers.
+Operational procedures for Azure Container Apps Job execution of Quotation Scrapers.
 
 ## Components
 
@@ -102,3 +102,4 @@ powershell -ExecutionPolicy Bypass -File .\infra\azure\configure_job_identity_an
 - Some routes naturally return "sem cotacao" and this is not a hard failure by itself.
 - Full job can take hours; smoke runs should be used for fast operational checks.
 - Anonymous share links can be blocked by tenant policy; upload can still succeed.
+

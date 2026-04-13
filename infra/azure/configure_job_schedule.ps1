@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$EnvFile = ".\infra\azure\dev.env",
     [string]$ImageName = "",
     [string]$ImageTag = "latest",
@@ -27,8 +27,8 @@ $jobReplicaRetry = if ($cfg.ContainsKey("AZ_JOB_REPLICA_RETRY_LIMIT")) { $cfg["A
 $jobReplicaCompletion = if ($cfg.ContainsKey("AZ_JOB_REPLICA_COMPLETION_COUNT")) { $cfg["AZ_JOB_REPLICA_COMPLETION_COUNT"] } else { "1" }
 $jobParallelism = if ($cfg.ContainsKey("AZ_JOB_PARALLELISM")) { $cfg["AZ_JOB_PARALLELISM"] } else { "1" }
 $jobCronUtc = if ($cfg.ContainsKey("AZ_JOB_CRON_UTC")) { $cfg["AZ_JOB_CRON_UTC"] } else { "0 7 * * 1-5" }
-$jobContainerName = if ($cfg.ContainsKey("AZ_JOB_CONTAINER_NAME")) { $cfg["AZ_JOB_CONTAINER_NAME"] } else { "cotation-scrapers" }
-$defaultImageName = if ($cfg.ContainsKey("AZ_IMAGE_NAME")) { $cfg["AZ_IMAGE_NAME"] } else { "cotation-scrapers" }
+$jobContainerName = if ($cfg.ContainsKey("AZ_JOB_CONTAINER_NAME")) { $cfg["AZ_JOB_CONTAINER_NAME"] } else { "quotation-scrapers" }
+$defaultImageName = if ($cfg.ContainsKey("AZ_IMAGE_NAME")) { $cfg["AZ_IMAGE_NAME"] } else { "quotation-scrapers" }
 
 if (-not $ImageName) {
     $ImageName = $defaultImageName
@@ -152,3 +152,4 @@ Write-Host "Schedule configured."
 Write-Host "- job: $jobName"
 Write-Host "- image: $image"
 Write-Host "- cron(UTC): $jobCronUtc"
+

@@ -1,4 +1,4 @@
-# Subplan 02 - Local Docker Predeploy
+﻿# Subplan 02 - Local Docker Predeploy
 
 ## Status Atual (feito e pendente)
 
@@ -17,10 +17,10 @@
 - Scraper Maersk preparado para ambiente container sem canal Chrome instalado:
   - nova env `MAERSK_BROWSER_CHANNEL` (`bundled`/`playwright` para usar Chromium bundled).
 - Build local da imagem executado com sucesso:
-  - comando: `docker build -t cotation-scrapers:local .`
-  - resultado: imagem `cotation-scrapers:local` criada.
+  - comando: `docker build -t quotation-scrapers:local .`
+  - resultado: imagem `quotation-scrapers:local` criada.
 - Sanidade de execucao no container validada sem scraping pesado:
-  - comando: `docker run --rm cotation-scrapers:local python src/orchestration/daily_pipeline_runner.py --dry-run`
+  - comando: `docker run --rm quotation-scrapers:local python src/orchestration/daily_pipeline_runner.py --dry-run`
   - resultado: exit code `0` e pipeline dry-run concluido.
   - evidencia: `artifacts/logs/20260331_122001_docker_dryrun.log`
 - Validacao cloud-like com geracao real de artefatos no container concluida:
@@ -63,7 +63,7 @@ Empacotar a rotina em Docker e validar localmente de ponta a ponta antes de subi
 ## Comandos base (modelo)
 
 ```powershell
-docker build -t cotation-scrapers:local .
+docker build -t quotation-scrapers:local .
 ```
 
 ```powershell
@@ -72,7 +72,7 @@ docker run --rm `
   -e UPLOAD_MODE=SHAREPOINT `
   -e UPLOAD_ENSURE_ONEDRIVE=FALSE `
   -v "${PWD}\artifacts:/app/artifacts" `
-  cotation-scrapers:local
+  quotation-scrapers:local
 ```
 
 ## Verificacoes obrigatorias
@@ -101,3 +101,4 @@ docker run --rm `
 - Build local reproduzivel.
 - Run completo dentro do container sem dependencia do host fora de envs e volume.
 - Evidencia de artefatos finais e logs.
+

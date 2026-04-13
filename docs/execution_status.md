@@ -1,4 +1,4 @@
-# Execution Status - Azure Migration
+﻿# Execution Status - Azure Migration
 
 Last update: 2026-03-31
 
@@ -44,10 +44,10 @@ Track, in one place, what is already done and what is still pending for the Azur
   - runtime dependencies completed in `requirements.txt`
   - Maersk browser channel made configurable (`MAERSK_BROWSER_CHANNEL`)
 - Docker local build validated:
-  - command: `docker build -t cotation-scrapers:local .`
+  - command: `docker build -t quotation-scrapers:local .`
   - result: image generated successfully.
 - Docker runtime sanity validated:
-  - command: `docker run --rm cotation-scrapers:local python src/orchestration/daily_pipeline_runner.py --dry-run`
+  - command: `docker run --rm quotation-scrapers:local python src/orchestration/daily_pipeline_runner.py --dry-run`
   - result: exit code `0`.
   - evidence: `artifacts/logs/20260331_122001_docker_dryrun.log`
 - Docker cloud-like fast validation with real outputs completed:
@@ -125,3 +125,4 @@ Track, in one place, what is already done and what is still pending for the Azur
   - `Done in this cycle`
   - `Still pending`
   - `Blockers / info needed`
+

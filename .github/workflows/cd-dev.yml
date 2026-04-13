@@ -1,4 +1,4 @@
-name: CD Dev
+﻿name: CD Dev
 
 on:
   workflow_dispatch:
@@ -39,17 +39,17 @@ jobs:
           AZ_ENV=dev
           AZ_RESOURCE_GROUP=${{ secrets.AZ_RESOURCE_GROUP_DEV }}
           AZ_ACR_NAME=${{ secrets.AZ_ACR_NAME_DEV }}
-          AZ_LOG_ANALYTICS_NAME=${{ vars.AZ_LOG_ANALYTICS_NAME_DEV || 'log-cotation-scrapers-dev' }}
+          AZ_LOG_ANALYTICS_NAME=${{ vars.AZ_LOG_ANALYTICS_NAME_DEV || 'log-quotation-scrapers-dev' }}
           AZ_CONTAINERAPPS_ENV_NAME=${{ secrets.AZ_CONTAINERAPPS_ENV_NAME_DEV }}
           AZ_KEYVAULT_NAME=${{ secrets.AZ_KEYVAULT_NAME_DEV }}
           AZ_STORAGE_ACCOUNT_NAME=${{ vars.AZ_STORAGE_ACCOUNT_NAME_DEV || 'stcotscrapersdev' }}
           AZ_FILE_SHARE_NAME=${{ vars.AZ_FILE_SHARE_NAME_DEV || 'cotation-artifacts' }}
           AZ_CONTAINERAPP_JOB_NAME=${{ secrets.AZ_CONTAINERAPP_JOB_NAME_DEV }}
-          AZ_TAG_PROJECT=cotation-scrapers
+          AZ_TAG_PROJECT=quotation-scrapers
           AZ_TAG_OWNER=data-analytics
           AZ_TAG_COST_CENTER=not-set
-          AZ_IMAGE_NAME=cotation-scrapers
-          AZ_JOB_CONTAINER_NAME=cotation-scrapers
+          AZ_IMAGE_NAME=quotation-scrapers
+          AZ_JOB_CONTAINER_NAME=quotation-scrapers
           AZ_JOB_CRON_UTC=${{ vars.AZ_JOB_CRON_UTC_DEV || '0 7 * * 1-5' }}
           EOF
 
@@ -68,3 +68,4 @@ jobs:
         shell: pwsh
         run: |
           ./infra/azure/start_job_smoke.ps1 -EnvFile ./infra/azure/dev.ci.env -NoWait
+

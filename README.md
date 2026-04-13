@@ -1,4 +1,4 @@
-# Cotation Scrapers
+﻿# Quotation Scrapers
 
 Pipeline para coletar cotacoes de frete, comparar carriers e gerar planilha final para cliente.
 
@@ -282,7 +282,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install_weekday_task.ps1 -Sta
 Build da imagem:
 
 ```powershell
-docker build -t cotation-scrapers:local .
+docker build -t quotation-scrapers:local .
 ```
 
 Run cloud-like rapido (sem OneDrive desktop):
@@ -301,7 +301,7 @@ docker run --rm `
   -e MAERSK_BROWSER_CHANNEL=bundled `
   -v "${PWD}\artifacts:/app/artifacts" `
   -v "${manualPath}:/manual:ro" `
-  cotation-scrapers:local
+  quotation-scrapers:local
 ```
 
 ## Azure Bootstrap (Subplan 03)
@@ -385,3 +385,4 @@ powershell -ExecutionPolicy Bypass -File .\infra\azure\bootstrap_dev_all.ps1 -En
 
 Detalhes de secrets/vars e release flow:
 - `docs/cicd_release_guide.md`
+

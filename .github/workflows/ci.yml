@@ -1,4 +1,4 @@
-name: CI
+﻿name: CI
 
 on:
   push:
@@ -41,4 +41,5 @@ jobs:
 
       - name: Build Docker image
         run: |
-          docker build -t cotation-scrapers:ci .
+          docker build -t quotation-scrapers:ci .
+

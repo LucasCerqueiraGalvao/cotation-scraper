@@ -1,7 +1,7 @@
-param(
+﻿param(
     [string]$EnvFile = ".\infra\azure\dev.env",
     [string]$ImageTag = "latest",
-    [string]$ImageName = "cotation-scrapers"
+    [string]$ImageName = "quotation-scrapers"
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,7 +23,7 @@ $jobReplicaTimeout = if ($cfg.ContainsKey("AZ_JOB_REPLICA_TIMEOUT_SEC")) { $cfg[
 $jobReplicaRetry = if ($cfg.ContainsKey("AZ_JOB_REPLICA_RETRY_LIMIT")) { $cfg["AZ_JOB_REPLICA_RETRY_LIMIT"] } else { "0" }
 $jobReplicaCompletion = if ($cfg.ContainsKey("AZ_JOB_REPLICA_COMPLETION_COUNT")) { $cfg["AZ_JOB_REPLICA_COMPLETION_COUNT"] } else { "1" }
 $jobParallelism = if ($cfg.ContainsKey("AZ_JOB_PARALLELISM")) { $cfg["AZ_JOB_PARALLELISM"] } else { "1" }
-$jobContainerName = if ($cfg.ContainsKey("AZ_JOB_CONTAINER_NAME")) { $cfg["AZ_JOB_CONTAINER_NAME"] } else { "cotation-scrapers" }
+$jobContainerName = if ($cfg.ContainsKey("AZ_JOB_CONTAINER_NAME")) { $cfg["AZ_JOB_CONTAINER_NAME"] } else { "quotation-scrapers" }
 
 Write-Host "Setting Azure subscription..."
 Set-AzureSubscription -AzExe $azExe -SubscriptionId $subscriptionId
@@ -69,3 +69,4 @@ Invoke-Az -AzExe $azExe -Args @(
 )
 
 Write-Host "Job created and manual execution triggered successfully."
+
